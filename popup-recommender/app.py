@@ -243,9 +243,22 @@ def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_
     # 모든 유형을 항상 보여줌: 후보(상위 300곳) 안에 있는 유형은 그 안의 순위대로,
     # 후보 안에 없는 유형도 그 유형 안에서 같은 점수 식으로 상위 장소를 가져와 뒤에 붙임 (점수가 낮아도 표시)
     first = big.groupby('유형', sort=False)['전체 순위'].min().sort_values()
-    parts = [big[big['유형'] == g].sort_values('전체 순위').head(per_group).assign(후보밖=False) for g in first.index]
     score_all = fit_score + lam * crowd + bonus
     finite = np.isfinite(score_all)
+
+    def fill_rows(g, have):
+        """후보 안에 그 유형이 per_group곳보다 적으면, 후보 밖의 같은 유형 장소로 나머지 칸을 채움"""
+        idx = np.where((A['group'] == g) & finite)[0]
+        idx = [int(j) for j in idx[np.argsort(-score_all[idx])] if int(j) not in have][:per_group - len(have)]
+        return pd.DataFrame({'_i': idx, '유형': g, '후보밖': True,
+                             '전체 순위': [int((score_all[finite] > score_all[j]).sum()) + 1 for j in idx]})
+
+    parts = []
+    for g in first.index:
+        sub = big[big['유형'] == g].sort_values('전체 순위').head(per_group).assign(후보밖=False)
+        if len(sub) < per_group:
+            sub = pd.concat([sub, fill_rows(g, set(sub['_i']))], ignore_index=True)
+        parts.append(sub)
     extra = []
     for g in dict.fromkeys(A['group']):
         if g == '기타' or g in first.index:

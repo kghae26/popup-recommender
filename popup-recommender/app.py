@@ -34,8 +34,7 @@ st.markdown('''<style>
 .stTabs [role="tab"] { padding: 2px 12px !important; border: 1px solid rgba(128,128,128,.35); border-radius: 16px; margin: 0 !important; }
 .stTabs [role="tab"][aria-selected="true"] { background: rgba(214,69,65,.12); border-color: rgba(214,69,65,.75); }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"], .stTabs .react-aria-SelectionIndicator { display: none !important; }
-[class*="st-key-out_"] { background: #f2f2f2; border-radius: 10px; }
-@media (prefers-color-scheme: dark) { [class*="st-key-out_"] { background: #2b2b2b; } }
+[class*="st-key-out_"] { background: rgba(127,140,141,.10); border-radius: 10px; }   /* 반투명: 밝은·어두운 테마 모두 글자가 보이게 */
 </style>''', unsafe_allow_html=True)
 OUT_BADGE = ('<span style="background:#7f8c8d;color:white;border-radius:10px;padding:1px 8px;font-size:.75rem">'
              '후보 밖</span>')
@@ -363,39 +362,73 @@ def latlon(idx):
 
 
 # ──────────────────────────────────────────────────────────────
-# 5. 화면: 사이드바(입력) → 제품 태그 → 유형별 추천(더보기) → 선택 장소 근거 → 비슷한 장소 → 두 장소 비교
+# 5. 화면: 사이드바(메뉴·축 설명) / 메인(입력) → 제품 태그 → 유형별 추천(더보기) → 선택 장소 근거 → 비슷한 장소 → 두 장소 비교
 # ──────────────────────────────────────────────────────────────
 st.title('📍 팝업스토어 장소 추천')
 st.caption('유명해서가 아니라 **제품과 연결되기 때문에** 추천합니다. 유명세는 최소 규모 거르기와 후보 안 순서 조정에만 씁니다.')
 
 MENU = ['📍 추천 (메인)', '🔎 비슷한 장소 찾기', '⚖️ 두 장소 비교']
+AX_DESC = {'situation': '방문객이 그 장소에서 겪는 상황 (젖음, 땀, 휴식 …)', 'material': '장소에 있는 소재 (물·바다, 꽃, 향 …)',
+           'value': '장소가 상징하는 가치 (친환경, 전통, 로컬 …)', 'issue': '장소가 가진 과제 (쇠퇴, 유휴공간 …)',
+           'aesthetic': '장소의 분위기 (한옥, 레트로, 자연경관 …)', 'audience': '주로 오는 사람 (2030, 가족 …)',
+           'scale': '공간의 단위 (거리·코스, 대형 야외)', 'season': '팝업 월과 장소의 계절이 맞는지'}
+
+# 왼쪽(사이드바)은 메뉴와 축 설명만
 with st.sidebar:
     view = st.radio('메뉴', MENU, key='view')      # ①~③은 메인, 나머지는 메뉴에서 골라 봄
     st.divider()
-    st.header('입력')
-    with st.form('input'):
-        text = st.text_area('제품·서비스 설명', '핸드메이드 입욕제·비누·바디케어 제품을 판다.', height=110,
-                            help='제품이 무엇인지, 어떤 상황에서 쓰는지를 적을수록 태그가 잘 붙습니다.')
-        month = st.selectbox('팝업 월', [None] + list(range(1, 13)), index=7,
-                             format_func=lambda m: '정하지 않음' if m is None else f'{m}월')
-        ages = st.multiselect('타깃 연령', AGE_OPTIONS, default=['20대', '30대'])
-        goal = st.radio('목표', list(GOAL_KO), format_func=GOAL_KO.get, horizontal=False)
-        with st.expander('세부 설정'):
-            lam = st.slider('유동인구 반영 (λ)', 0.0, 1.0, float(DEF.get('lam', .2)), .05,
-                            help='0이면 연결성·특색만. 키울수록 유명한 지역이 위로 올라옵니다.')
-            w_distinct = st.slider('특색 가중치', 0.0, 1.0, float(DEF.get('w_distinct', .3)), .05)
-            min_vis_q = st.slider('방문자 하위 몇 % 시군구 제외', 0.0, 0.8, float(DEF.get('min_vis_q', .3)), .05)
-            per_sgg = st.number_input('한 유형 안에서 시군구당 최대 장소 수', 1, 10, int(DEF.get('per_sgg', 2)),
-                                      help='한 유형 탭이 한 지역 장소로만 채워지지 않게 합니다. 유형이 다르면 같은 시군구도 따로 셉니다.')
-            per_group = st.number_input('유형별 장소 수', 1, 10, int(DEF.get('per_group', 3)))
-        go = st.form_submit_button('추천 받기', type='primary', width='stretch')
-    st.markdown('**태그 색 (축)**<br>' + legend_html(), unsafe_allow_html=True)
+    st.markdown('**태그 색 = 축**')
+    st.markdown('<br>'.join(f'{chip(AX_KO[a], a, .8)} <span style="font-size:.8rem">{AX_DESC[a]}</span>' for a in AX_KO),
+                unsafe_allow_html=True)
+    st.caption('장소 태그는 색이 진할수록 그 장소의 점수를 많이 만든 태그입니다.')
 
-# 버튼을 누르면 계산해서 세션에 저장 → 장소를 클릭해도 다시 계산하지 않음
+# 입력값: 마지막으로 '추천 받기'를 누른 값을 기억해 두었다가, 다른 메뉴에 다녀와도 그대로 보여줌
+DEFAULT_INPUTS = dict(text='핸드메이드 입욕제·비누·바디케어 제품을 판다.', month=7, ages=['20대', '30대'], goal='balanced',
+                      lam=float(DEF.get('lam', .2)), w_distinct=float(DEF.get('w_distinct', .3)),
+                      min_vis_q=float(DEF.get('min_vis_q', .3)), per_sgg=int(DEF.get('per_sgg', 2)),
+                      per_group=int(DEF.get('per_group', 3)))
+INP = st.session_state.get('inputs', DEFAULT_INPUTS)
+
+
+def input_form(v):
+    """메인 화면 맨 위의 입력 칸 (form이라 '추천 받기'를 누를 때만 계산)"""
+    with st.form('input'):
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            text = st.text_area('제품·서비스 설명', v['text'], height=128,
+                                help='제품이 무엇인지, 어떤 상황에서 쓰는지를 적을수록 태그가 잘 붙습니다.')
+        with c2:
+            months = [None] + list(range(1, 13))
+            month = st.selectbox('팝업 월', months, index=months.index(v['month']),
+                                 format_func=lambda m: '정하지 않음' if m is None else f'{m}월')
+            ages = st.multiselect('타깃 연령', AGE_OPTIONS, default=v['ages'])
+            goal = st.radio('목표', list(GOAL_KO), index=list(GOAL_KO).index(v['goal']), format_func=GOAL_KO.get, horizontal=True)
+        with st.expander('세부 설정'):
+            d1, d2, d3 = st.columns(3)
+            lam = d1.slider('유동인구 반영 (λ)', 0.0, 1.0, v['lam'], .05,
+                            help='0이면 연결성·특색만. 키울수록 유명한 지역이 위로 올라옵니다.')
+            w_distinct = d2.slider('특색 가중치', 0.0, 1.0, v['w_distinct'], .05)
+            min_vis_q = d3.slider('방문자 하위 몇 % 시군구 제외', 0.0, 0.8, v['min_vis_q'], .05)
+            per_sgg = d1.number_input('한 유형 안에서 시군구당 최대 장소 수', 1, 10, v['per_sgg'],
+                                      help='한 유형 탭이 한 지역 장소로만 채워지지 않게 합니다. 유형이 다르면 같은 시군구도 따로 셉니다.')
+            per_group = d2.number_input('유형별 장소 수', 1, 10, v['per_group'])
+        go = st.form_submit_button('추천 받기', type='primary', width='stretch')
+    return go, dict(text=text, month=month, ages=ages, goal=goal, lam=lam, w_distinct=w_distinct,
+                    min_vis_q=min_vis_q, per_sgg=int(per_sgg), per_group=int(per_group))
+
+
+go = False
+if view == MENU[0]:
+    go, new_inp = input_form(INP)
+    if go:
+        INP = new_inp
+
+# 버튼을 누르면 계산해서 세션에 저장 → 장소를 클릭하거나 메뉴를 옮겨도 다시 계산하지 않음
 if go or 'res' not in st.session_state:
     with st.spinner('장소 점수를 계산하는 중...'):
-        res, ctx = recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, int(per_sgg), int(per_group))
-    st.session_state.update(res=res, ctx=ctx, sel=int(res['_i'].iloc[0]) if len(res) else None)
+        res, ctx = recommend(INP['text'], INP['month'], INP['ages'], INP['goal'], INP['lam'], INP['w_distinct'],
+                             INP['min_vis_q'], INP['per_sgg'], INP['per_group'])
+    st.session_state.update(res=res, ctx=ctx, inputs=INP, sel=int(res['_i'].iloc[0]) if len(res) else None)
 res, ctx = st.session_state['res'], st.session_state['ctx']
 if res.empty and view != MENU[0]:
     st.info('추천 결과가 없습니다. 메인 화면에서 조건을 바꿔 다시 추천받아 주세요.')
@@ -444,6 +477,25 @@ def score_of(i, ctx):
 
 def fit_rank_of(i, ctx):
     return int((ctx['fit_score'] > ctx['fit_score'][i]).sum()) + 1 if np.isfinite(ctx['fit_score'][i]) else None
+
+
+def out_reason(j, ctx):
+    """후보 밖인데 목록에 올라온 이유: 그 유형 안 적합 순위 + 무엇이 끌어올렸나(유동인구 / 연령)"""
+    idx = np.where((A['group'] == A['group'][j]) & np.isfinite(ctx['fit_score']))[0]
+    order = idx[np.argsort(-ctx['fit_score'][idx])]                 # 후보를 뽑을 때와 같은 순서 (동점도 같은 순서)
+    r = int(np.where(order == j)[0][0]) + 1
+    up_crowd, up_age = ctx['lam'] * ctx['crowd'][j], float(ctx['bonus'][j])
+    why = []
+    if up_crowd > 0.02:
+        why.append(f'유동인구 점수 +{up_crowd:.2f}')
+    if up_age > 0.02:
+        why.append(f'타깃 연령 가점 +{up_age:.2f}')
+    lift = ' · '.join(why) + '로 올라옴' if why else '다른 장소들이 거르기·지역 제한으로 빠지며 올라옴'
+    return f'유형 내 적합 {r}위 (상위 30곳 밖) · {lift}'
+
+
+def out_tag(j, ctx):
+    return (OUT_BADGE + f' <span style="color:gray;font-size:.75rem">{out_reason(j, ctx)}</span>')
 
 
 def type_ranking(g, ctx, per_sgg=None, n=50):
@@ -597,7 +649,7 @@ if view == MENU[0]:
                     out = not np.isfinite(ctx['final'][i])          # 그 유형의 적합도 상위 30곳 밖이면 '후보 밖'
                     with col, st.container(border=True, key=f'{"out" if out else "in"}_card_{g}_{i}'):
                         if out:
-                            st.markdown(OUT_BADGE, unsafe_allow_html=True)
+                            st.markdown(out_tag(i, ctx), unsafe_allow_html=True)
                         url = photo_url(i)
                         if url:
                             st.image(url, width='stretch')
@@ -613,7 +665,7 @@ if view == MENU[0]:
                 ranked = type_ranking(g, ctx)
                 if len(ranked) < 50:
                     st.caption(f'이 유형에서 거르기 조건(방문자 수·팝업 월 축제·산 이름)을 통과한 장소가 {len(ranked)}곳이라 {len(ranked)}곳까지 보여줍니다.')
-                st.caption('회색 배경에 "후보 밖" 표시가 있는 곳은 이 유형에서 적합도 상위 30곳 밖이라, 유동인구·연령 점수가 더해져 올라온 장소입니다.')
+                st.caption('회색 배경의 "후보 밖": 상위 30곳 밖이지만, 유동인구·연령 점수가 더해져 올라온 장소입니다.')
                 pages = max(1, -(-len(ranked) // 10))
                 page = st.segmented_control('페이지', [f'{p * 10 + 1}~{min((p + 1) * 10, len(ranked))}위' for p in range(pages)],
                                             default=f'1~{min(10, len(ranked))}위', key=f'page_{g}') or f'1~{min(10, len(ranked))}위'
@@ -625,7 +677,7 @@ if view == MENU[0]:
                         out = not np.isfinite(ctx['final'][j])
                         with st.container(border=True, key=f'{"out" if out else "in"}_row_{g}_{j}'):
                             a, b = st.columns([5, 1])
-                            a.markdown((OUT_BADGE + ' ' if out else '') + f'**{n}. {PL.at[j, "kto_title"]}** <span style="color:gray;font-size:.8rem">'
+                            a.markdown((out_tag(j, ctx) + '<br>' if out else '') + f'**{n}. {PL.at[j, "kto_title"]}** <span style="color:gray;font-size:.8rem">'
                                        f'{A["sido"][j]} {A["sgg"][j]}</span><br>{top_chips(j, ctx, 3)}', unsafe_allow_html=True)
                             if b.button('근거', key=f'more_sel_{g}_{j}', type='primary' if st.session_state.get('sel') == j else 'secondary'):
                                 st.session_state['sel'] = j

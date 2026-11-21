@@ -34,6 +34,19 @@ st.markdown('''<style>
 .stTabs [role="tab"] { padding: 2px 12px !important; border: 1px solid rgba(128,128,128,.35); border-radius: 16px; margin: 0 !important; }
 .stTabs [role="tab"][aria-selected="true"] { background: rgba(214,69,65,.12); border-color: rgba(214,69,65,.75); }
 .stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"], .stTabs .react-aria-SelectionIndicator { display: none !important; }
+/* 사이드바 메뉴를 큰 버튼처럼 (Streamlit 버전에 따라 구조가 달라서 두 가지 선택자를 함께 씀) */
+[data-testid="stSidebar"] [role="radiogroup"] { gap: 8px; display: flex; flex-direction: column; }
+[data-testid="stSidebar"] [role="radiogroup"] > div { width: 100%; }
+[data-testid="stSidebar"] [data-testid="stRadioOption"], [data-testid="stSidebar"] [role="radiogroup"] > label {
+  width: 100%; padding: 10px 14px; border-radius: 10px; border: 1.5px solid rgba(214,69,65,.35);
+  background: rgba(214,69,65,.06); cursor: pointer; margin: 0; box-sizing: border-box; }
+[data-testid="stSidebar"] [data-testid="stRadioOption"] p, [data-testid="stSidebar"] [role="radiogroup"] > label p { font-size: 1.05rem; }
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked), [data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) {
+  background: rgba(214,69,65,.9); border-color: rgb(214,69,65); }
+[data-testid="stSidebar"] [data-testid="stRadioOption"]:has(input:checked) p, [data-testid="stSidebar"] [role="radiogroup"] > label:has(input:checked) p {
+  color: white; font-weight: 700; }
+[data-testid="stSidebar"] [data-testid="stRadioOption"] > div > div:first-child:not([data-testid]),
+[data-testid="stSidebar"] [role="radiogroup"] > label > div:first-child:not([data-testid]) { display: none; }   /* 동그라미 숨김 */
 [class*="st-key-out_"] { background: rgba(127,140,141,.10); border-radius: 10px; }   /* 반투명: 밝은·어두운 테마 모두 글자가 보이게 */
 </style>''', unsafe_allow_html=True)
 OUT_BADGE = ('<span style="background:#7f8c8d;color:white;border-radius:10px;padding:1px 8px;font-size:.75rem">'
@@ -375,12 +388,15 @@ AX_DESC = {'situation': '방문객이 그 장소에서 겪는 상황 (젖음, �
 
 # 왼쪽(사이드바)은 메뉴와 축 설명만
 with st.sidebar:
-    view = st.radio('메뉴', MENU, key='view')      # ①~③은 메인, 나머지는 메뉴에서 골라 봄
+    st.markdown('### 📂 메뉴')
+    view = st.radio('메뉴', MENU, key='view', label_visibility='collapsed')   # ①~③은 메인, 나머지는 메뉴에서 골라 봄
     st.divider()
-    st.markdown('**태그 색 = 축**')
-    st.markdown('<br>'.join(f'{chip(AX_KO[a], a, .8)} <span style="font-size:.8rem">{AX_DESC[a]}</span>' for a in AX_KO),
+    st.markdown('**태그 색 = 축** <span style="font-size:.75rem;color:gray">(칩에 커서를 올리면 설명)</span>',
                 unsafe_allow_html=True)
+    st.markdown(' '.join(chip(AX_KO[a], a, .8, AX_DESC[a]) for a in AX_KO), unsafe_allow_html=True)   # title 속성 = 툴팁
     st.caption('장소 태그는 색이 진할수록 그 장소의 점수를 많이 만든 태그입니다.')
+    st.info('💡 제품만 적지 말고, 축 설명의 관점(쓰는 상황, 소재, 가치, 분위기, 타깃)으로 **기획 의도까지** 적으면 '
+            '더 많은 태그가 붙어서 더 다양한 유형의 장소를 추천받을 수 있어요.')
 
 # 입력값: 마지막으로 '추천 받기'를 누른 값을 기억해 두었다가, 다른 메뉴에 다녀와도 그대로 보여줌
 DEFAULT_INPUTS = dict(text='핸드메이드 입욕제·비누·바디케어 제품을 판다.', month=7, ages=['20대', '30대'], goal='balanced',
@@ -412,6 +428,8 @@ def input_form(v):
             per_sgg = d1.number_input('한 유형 안에서 시군구당 최대 장소 수', 1, 10, v['per_sgg'],
                                       help='한 유형 탭이 한 지역 장소로만 채워지지 않게 합니다. 유형이 다르면 같은 시군구도 따로 셉니다.')
             per_group = d2.number_input('유형별 장소 수', 1, 10, v['per_group'])
+        st.caption('💡 왼쪽 축 칩에 커서를 올려 보고, 그 관점(쓰는 상황·소재·가치·분위기·타깃)으로 제품과 기획 의도를 적으면 '
+                   '더 다양한 추천을 받을 수 있어요. 예: "여름 물놀이 뒤 씻고 쉬는 순간을 위한, 향이 진한 핸드메이드 입욕제"')
         go = st.form_submit_button('추천 받기', type='primary', width='stretch')
     return go, dict(text=text, month=month, ages=ages, goal=goal, lam=lam, w_distinct=w_distinct,
                     min_vis_q=min_vis_q, per_sgg=int(per_sgg), per_group=int(per_group))

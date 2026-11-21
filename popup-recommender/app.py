@@ -191,7 +191,7 @@ def age_bonus(target_age, w_age, w_top):
     return b
 
 
-def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, n_groups, per_group, pool=300, keep_fest=True):
+def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool=300):
     """셀 O(연결성 우선) + 셀 P(유형별 묶기) + 셀 Q(연령 가점).
     결과표와 함께, 근거 화면에서 쓸 중간 계산값(ctx)을 돌려줍니다."""
     tags, fired = product_tags(text)
@@ -240,23 +240,25 @@ def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, n_gr
     big['유형'] = A['group'][big['_i']] if len(big) else []
     if (big['유형'] != '기타').any():
         big = big[big['유형'] != '기타']
-    order = list(big.groupby('유형', sort=False)['전체 순위'].min().sort_values().index[:n_groups])
-
-    # 축제·행사는 이 프로젝트의 핵심 유형이라, 상위 유형 안에 못 들어도 항상 한 칸을 보여줌
-    # (축제는 소개글이 짧아 적합도가 낮게 나오기 쉬움 → 후보 밖의 축제도 적합도 순으로 가져옴)
-    FEST = '축제·행사'
-    if keep_fest and FEST not in order:
-        fest_i = np.where((A['group'] == FEST) & np.isfinite(fit_score))[0]
-        if len(fest_i):
-            fest_i = fest_i[np.argsort(-fit_score[fest_i])][:per_group]
-            final[fest_i] = np.where(np.isfinite(final[fest_i]), final[fest_i],
-                                     fit_score[fest_i] + lam * crowd[fest_i] + bonus[fest_i])
-            extra = pd.DataFrame({'_i': fest_i.astype(int), '유형': FEST,
-                                  '전체 순위': [int((fit_score > fit_score[j]).sum()) + 1 for j in fest_i]})
-            big = pd.concat([big[big['유형'] != FEST], extra], ignore_index=True)
-            order = order[:max(n_groups - 1, 1)] + [FEST]
-    res = pd.concat([big[big['유형'] == g].sort_values('전체 순위').head(per_group).assign(유형순위=k) for k, g in enumerate(order, 1)],
-                    ignore_index=True) if len(order) else big.head(0)
+    # 모든 유형을 항상 보여줌: 후보(상위 300곳) 안에 있는 유형은 그 안의 순위대로,
+    # 후보 안에 없는 유형도 그 유형 안에서 같은 점수 식으로 상위 장소를 가져와 뒤에 붙임 (점수가 낮아도 표시)
+    first = big.groupby('유형', sort=False)['전체 순위'].min().sort_values()
+    parts = [big[big['유형'] == g].sort_values('전체 순위').head(per_group).assign(후보밖=False) for g in first.index]
+    score_all = fit_score + lam * crowd + bonus
+    finite = np.isfinite(score_all)
+    extra = []
+    for g in dict.fromkeys(A['group']):
+        if g == '기타' or g in first.index:
+            continue
+        idx = np.where((A['group'] == g) & finite)[0]
+        if len(idx):
+            top = idx[np.argsort(-score_all[idx])][:per_group]
+            extra.append((score_all[top[0]], g, top))
+    for _, g, top in sorted(extra, key=lambda x: -x[0]):
+        parts.append(pd.DataFrame({'_i': top.astype(int), '유형': g, '후보밖': True,
+                                   '전체 순위': [int((score_all[finite] > score_all[j]).sum()) + 1 for j in top]}))
+    res = pd.concat(parts, ignore_index=True) if parts else big.head(0).assign(후보밖=False)
+    res['유형순위'] = res['유형'].map({g: k for k, g in enumerate(dict.fromkeys(res['유형']), 1)})
     ctx = dict(text=text, month=month, tags=tags, fired=fired, w=w, F=F, beta=beta, fit=fit, zfit=zfit, zd=zd,
                crowd=crowd, bonus=bonus, fit_score=fit_score, final=final, lam=lam, w_distinct=w_distinct, ok=ok)
     return res, ctx
@@ -350,7 +352,10 @@ def latlon(idx):
 st.title('📍 팝업스토어 장소 추천')
 st.caption('유명해서가 아니라 **제품과 연결되기 때문에** 추천합니다. 유명세는 최소 규모 거르기와 후보 안 순서 조정에만 씁니다.')
 
+MENU = ['📍 추천 (메인)', '🔎 비슷한 장소 찾기', '⚖️ 두 장소 비교']
 with st.sidebar:
+    view = st.radio('메뉴', MENU, key='view')      # ①~③은 메인, 나머지는 메뉴에서 골라 봄
+    st.divider()
     st.header('입력')
     with st.form('input'):
         text = st.text_area('제품·서비스 설명', '핸드메이드 입욕제·비누·바디케어 제품을 판다.', height=110,
@@ -365,9 +370,6 @@ with st.sidebar:
             w_distinct = st.slider('특색 가중치', 0.0, 1.0, float(DEF.get('w_distinct', .3)), .05)
             min_vis_q = st.slider('방문자 하위 몇 % 시군구 제외', 0.0, 0.8, float(DEF.get('min_vis_q', .3)), .05)
             per_sgg = st.number_input('한 시군구 최대 장소 수', 1, 10, int(DEF.get('per_sgg', 2)))
-            n_groups = st.number_input('보여줄 유형 수', 1, 12, int(DEF.get('n_groups', 6)))
-            keep_fest = st.checkbox('축제·행사 유형은 항상 보기', value=True,
-                                    help='팝업 월에 열리는 축제 중 제품과 가장 잘 맞는 곳을 따로 한 칸 보여줍니다.')
             per_group = st.number_input('유형별 장소 수', 1, 10, int(DEF.get('per_group', 3)))
         go = st.form_submit_button('추천 받기', type='primary', width='stretch')
     st.markdown('**태그 색 (축)**<br>' + legend_html(), unsafe_allow_html=True)
@@ -375,42 +377,12 @@ with st.sidebar:
 # 버튼을 누르면 계산해서 세션에 저장 → 장소를 클릭해도 다시 계산하지 않음
 if go or 'res' not in st.session_state:
     with st.spinner('장소 점수를 계산하는 중...'):
-        res, ctx = recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, int(per_sgg), int(n_groups), int(per_group), keep_fest=keep_fest)
+        res, ctx = recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, int(per_sgg), int(per_group))
     st.session_state.update(res=res, ctx=ctx, sel=int(res['_i'].iloc[0]) if len(res) else None)
 res, ctx = st.session_state['res'], st.session_state['ctx']
-
-# ── 5-1. 제품 설명에서 뽑은 태그 + 설명 보완 도우미 ──
-st.subheader('① 제품 설명에서 읽은 태그')
-if not ctx['tags']:
-    st.warning('설명에서 태그를 하나도 못 찾았습니다. 아래 "설명 보완 도우미"의 단어를 참고해 설명을 고쳐 보세요.')
-else:
-    # 설명 문장 안에서 태그를 만든 단어를 그 축 색으로 칠해서 보여줌
-    shown = ctx['text']
-    for f in sorted(ctx['fired'], key=lambda f: -len(f['word'])):
-        ax = max(f['tags'], key=f['tags'].get).split(':')[0]
-        r, g, b = AX_RGB.get(ax, (120, 120, 120))
-        shown = shown.replace(f['word'], f'<b style="background:rgba({r},{g},{b},.25);border-radius:4px;padding:0 3px">{f["word"]}</b>', 1)
-    st.markdown(f'> {shown}', unsafe_allow_html=True)
-    chips = ' '.join(chip(f'{AX_KO[k.split(":")[0]]} · {k.split(":")[1]}', k.split(':')[0], v, f'가중치 {v}')
-                     for k, v in sorted(ctx['tags'].items(), key=lambda x: (list(AX_KO).index(x[0].split(':')[0]), -x[1])))
-    st.markdown(chips, unsafe_allow_html=True)
-    st.caption('색이 진할수록 제품에서 강하게 읽힌 태그입니다. 태그는 장소 소개글의 태그와 비교되어 "축별 적합도"가 됩니다.')
-
-with st.expander('✍️ 설명 보완 도우미: 이런 단어를 넣으면 이런 태그가 붙어요'):
-    used_axes = {k.split(':')[0] for k in ctx['tags']}
-    beta = MD['beta_fit']
-    st.write('비어 있는 축 중 **선택을 잘 설명하는 축(가중치가 큰 축)**부터 보여줍니다. 실제 제품과 맞는 단어만 넣으세요.')
-    rows = []
-    for pat, tg in MD['product_rules']:
-        if re.search(pat, ctx['text']):
-            continue
-        axes = {k.split(':')[0] for k in tg}
-        rows.append({'예시 단어': ', '.join(pat.split('|')[:4]),
-                     '붙는 태그': ' '.join(chip(k.split(':')[1], k.split(':')[0], v) for k, v in tg.items()),
-                     '새 축': ', '.join(AX_KO[a] for a in axes - used_axes) or '-',
-                     '_w': max(beta.get(a, 0) for a in axes) + (1 if axes - used_axes else 0)})
-    rows = sorted(rows, key=lambda r: -r['_w'])[:12]
-    st.markdown(pd.DataFrame(rows).drop(columns='_w').to_html(escape=False, index=False), unsafe_allow_html=True)
+if res.empty and view != MENU[0]:
+    st.info('추천 결과가 없습니다. 메인 화면에서 조건을 바꿔 다시 추천받아 주세요.')
+    st.stop()
 
 # ── 화면에서 함께 쓰는 도구: 커서를 올리면 이름이 뜨는 지도, 점수 계산, 근거 화면 ──
 def deck_map(idx, labels=None, highlight=None, height=380, key=None):
@@ -457,14 +429,15 @@ def fit_rank_of(i, ctx):
     return int((ctx['fit_score'] > ctx['fit_score'][i]).sum()) + 1 if np.isfinite(ctx['fit_score'][i]) else None
 
 
-def type_ranking(g, ctx, per_sgg, n=50):
-    """유형 g의 상위 n곳 (더보기용). 거르기를 통과한 같은 유형 장소를 최종 점수 식으로 정렬"""
+def type_ranking(g, ctx, per_sgg=None, n=50):
+    """유형 g의 상위 n곳 (더보기용). 거르기를 통과한 같은 유형 장소를 최종 점수 식으로 정렬.
+    더보기 목록은 '한 시군구 최대 장소 수' 제한을 걸지 않음 (걸면 50곳이 안 채워지는 유형이 많음)"""
     idx = np.where((A['group'] == g) & np.isfinite(ctx['fit_score']))[0]
     sc = ctx['fit_score'][idx] + ctx['lam'] * ctx['crowd'][idx] + ctx['bonus'][idx]
     out, cnt = [], Counter()
     for j in idx[np.argsort(-sc)]:
         key = (A['sido'][j], A['sgg'][j])
-        if cnt[key] >= per_sgg:
+        if per_sgg and cnt[key] >= per_sgg:
             continue
         cnt[key] += 1
         out.append(int(j))
@@ -553,158 +526,206 @@ def place_picker(label, default, key):
     return default
 
 
-# ── 5-2. 유형별 추천 목록 (기본 3곳, 더보기를 켜면 상위 50곳 목록 + 지도) ──
-st.subheader('② 유형별 추천')
-if res.empty:
-    st.info('조건에 맞는 장소가 없습니다. 세부 설정에서 제외 기준을 낮춰 보세요.')
-    st.stop()
+if view == MENU[0]:
+    # ── 5-1. 제품 설명에서 뽑은 태그 + 설명 보완 도우미 ──
+    st.subheader('① 제품 설명에서 읽은 태그')
+    if not ctx['tags']:
+        st.warning('설명에서 태그를 하나도 못 찾았습니다. 아래 "설명 보완 도우미"의 단어를 참고해 설명을 고쳐 보세요.')
+    else:
+        # 설명 문장 안에서 태그를 만든 단어를 그 축 색으로 칠해서 보여줌
+        shown = ctx['text']
+        for f in sorted(ctx['fired'], key=lambda f: -len(f['word'])):
+            ax = max(f['tags'], key=f['tags'].get).split(':')[0]
+            r, g, b = AX_RGB.get(ax, (120, 120, 120))
+            shown = shown.replace(f['word'], f'<b style="background:rgba({r},{g},{b},.25);border-radius:4px;padding:0 3px">{f["word"]}</b>', 1)
+        st.markdown(f'> {shown}', unsafe_allow_html=True)
+        chips = ' '.join(chip(f'{AX_KO[k.split(":")[0]]} · {k.split(":")[1]}', k.split(':')[0], v, f'가중치 {v}')
+                         for k, v in sorted(ctx['tags'].items(), key=lambda x: (list(AX_KO).index(x[0].split(':')[0]), -x[1])))
+        st.markdown(chips, unsafe_allow_html=True)
+        st.caption('색이 진할수록 제품에서 강하게 읽힌 태그입니다. 태그는 장소 소개글의 태그와 비교되어 "축별 적합도"가 됩니다.')
 
-types = list(dict.fromkeys(res['유형']))
-tabs = st.tabs([f'{k}. {g}' for k, g in enumerate(types, 1)])
-for tab, g in zip(tabs, types):
-    with tab:
-        more = st.toggle('더보기: 이 유형 상위 50곳 목록', key=f'more_{g}')
-        if not more:
-            # 기본 화면: 사진 카드 3장
-            sub = res[res['유형'] == g]
-            cols = st.columns(len(sub))
-            for col, (_, r) in zip(cols, sub.iterrows()):
-                i = int(r['_i'])
-                with col, st.container(border=True):
-                    url = photo_url(i)
-                    if url:
-                        st.image(url, width='stretch')
-                    st.markdown(f'**{PL.at[i, "kto_title"]}**')
-                    st.caption(f'{PL.at[i, "kto_addr1"] if "kto_addr1" in PL else ""} · 전체 {r["전체 순위"]}위')
-                    st.markdown(top_chips(i, ctx), unsafe_allow_html=True)
-                    if st.button('근거 보기', key=f'sel_{g}_{i}', width='stretch',
-                                 type='primary' if st.session_state.get('sel') == i else 'secondary'):
-                        st.session_state['sel'] = i
-                        st.rerun()
-        else:
-            # 더보기: 왼쪽 간단 목록(10곳씩), 오른쪽 그 10곳의 지도
-            ranked = type_ranking(g, ctx, int(per_sgg))
-            pages = max(1, -(-len(ranked) // 10))
-            page = st.segmented_control('페이지', [f'{p * 10 + 1}~{min((p + 1) * 10, len(ranked))}위' for p in range(pages)],
-                                        default=f'1~{min(10, len(ranked))}위', key=f'page_{g}') or f'1~{min(10, len(ranked))}위'
-            start = int(page.split('~')[0]) - 1
-            shown = ranked[start:start + 10]
-            lc, rc = st.columns([3, 2])
-            with lc:
-                for n, j in enumerate(shown, start + 1):
-                    with st.container(border=True):
-                        a, b = st.columns([5, 1])
-                        a.markdown(f'**{n}. {PL.at[j, "kto_title"]}** <span style="color:gray;font-size:.8rem">'
-                                   f'{A["sido"][j]} {A["sgg"][j]}</span><br>{top_chips(j, ctx, 3)}', unsafe_allow_html=True)
-                        if b.button('근거', key=f'more_sel_{g}_{j}', type='primary' if st.session_state.get('sel') == j else 'secondary'):
-                            st.session_state['sel'] = j
+    with st.expander('✍️ 설명 보완 도우미: 이런 단어를 넣으면 이런 태그가 붙어요'):
+        used_axes = {k.split(':')[0] for k in ctx['tags']}
+        beta = MD['beta_fit']
+        st.write('비어 있는 축 중 **선택을 잘 설명하는 축(가중치가 큰 축)**부터 보여줍니다. 실제 제품과 맞는 단어만 넣으세요.')
+        rows = []
+        for pat, tg in MD['product_rules']:
+            if re.search(pat, ctx['text']):
+                continue
+            axes = {k.split(':')[0] for k in tg}
+            rows.append({'예시 단어': ', '.join(pat.split('|')[:4]),
+                         '붙는 태그': ' '.join(chip(k.split(':')[1], k.split(':')[0], v) for k, v in tg.items()),
+                         '새 축': ', '.join(AX_KO[a] for a in axes - used_axes) or '-',
+                         '_w': max(beta.get(a, 0) for a in axes) + (1 if axes - used_axes else 0)})
+        rows = sorted(rows, key=lambda r: -r['_w'])[:12]
+        st.markdown(pd.DataFrame(rows).drop(columns='_w').to_html(escape=False, index=False), unsafe_allow_html=True)
+
+    # ── 5-2. 유형별 추천 목록 (기본 3곳, 더보기를 켜면 상위 50곳 목록 + 지도) ──
+    st.subheader('② 유형별 추천')
+    if res.empty:
+        st.info('조건에 맞는 장소가 없습니다. 세부 설정에서 제외 기준을 낮춰 보세요.')
+        st.stop()
+
+    types = list(dict.fromkeys(res['유형']))
+    tabs = st.tabs([f'{k}. {g}' for k, g in enumerate(types, 1)])
+    for tab, g in zip(tabs, types):
+        with tab:
+            more = st.toggle('더보기: 이 유형 상위 50곳 목록', key=f'more_{g}')
+            if not more:
+                # 기본 화면: 사진 카드 3장
+                sub = res[res['유형'] == g]
+                cols = st.columns(len(sub))
+                for col, (_, r) in zip(cols, sub.iterrows()):
+                    i = int(r['_i'])
+                    with col, st.container(border=True):
+                        url = photo_url(i)
+                        if url:
+                            st.image(url, width='stretch')
+                        st.markdown(f'**{PL.at[i, "kto_title"]}**')
+                        st.caption(f'{PL.at[i, "kto_addr1"] if "kto_addr1" in PL else ""} · 전체 {r["전체 순위"]}위'
+                                   + (' (후보 밖)' if r.get('후보밖', False) else ''))
+                        st.markdown(top_chips(i, ctx), unsafe_allow_html=True)
+                        if st.button('근거 보기', key=f'sel_{g}_{i}', width='stretch',
+                                     type='primary' if st.session_state.get('sel') == i else 'secondary'):
+                            st.session_state['sel'] = i
                             st.rerun()
-            with rc:
-                deck_map(shown, labels=list(range(start + 1, start + 1 + len(shown))),
-                         highlight=st.session_state.get('sel'), height=640, key=f'map_more_{g}_{start}')
-                st.caption('점에 커서를 올리면 장소 이름이 나옵니다. 빨간 점은 지금 근거를 보고 있는 장소입니다.')
+            else:
+                # 더보기: 왼쪽 간단 목록(10곳씩), 오른쪽 그 10곳의 지도
+                ranked = type_ranking(g, ctx)
+                if len(ranked) < 50:
+                    st.caption(f'이 유형에서 거르기 조건(방문자 수·팝업 월 축제·산 이름)을 통과한 장소가 {len(ranked)}곳이라 {len(ranked)}곳까지 보여줍니다.')
+                pages = max(1, -(-len(ranked) // 10))
+                page = st.segmented_control('페이지', [f'{p * 10 + 1}~{min((p + 1) * 10, len(ranked))}위' for p in range(pages)],
+                                            default=f'1~{min(10, len(ranked))}위', key=f'page_{g}') or f'1~{min(10, len(ranked))}위'
+                start = int(page.split('~')[0]) - 1
+                shown = ranked[start:start + 10]
+                lc, rc = st.columns([3, 2])
+                with lc:
+                    for n, j in enumerate(shown, start + 1):
+                        with st.container(border=True):
+                            a, b = st.columns([5, 1])
+                            a.markdown(f'**{n}. {PL.at[j, "kto_title"]}** <span style="color:gray;font-size:.8rem">'
+                                       f'{A["sido"][j]} {A["sgg"][j]}</span><br>{top_chips(j, ctx, 3)}', unsafe_allow_html=True)
+                            if b.button('근거', key=f'more_sel_{g}_{j}', type='primary' if st.session_state.get('sel') == j else 'secondary'):
+                                st.session_state['sel'] = j
+                                st.rerun()
+                with rc:
+                    deck_map(shown, labels=list(range(start + 1, start + 1 + len(shown))),
+                             highlight=st.session_state.get('sel'), height=640, key=f'map_more_{g}_{start}')
+                    st.caption('점에 커서를 올리면 장소 이름이 나옵니다. 빨간 점은 지금 근거를 보고 있는 장소입니다.')
 
-with st.expander('🗺️ 추천 장소 전체 지도'):
-    deck_map(res['_i'], highlight=st.session_state.get('sel'), key='map_all')
+    with st.expander('🗺️ 추천 장소 전체 지도'):
+        deck_map(res['_i'], highlight=st.session_state.get('sel'), key='map_all')
 
-# ── 5-3. 선택한 추천 장소의 순위 근거 ──
-i = st.session_state.get('sel')
-if i is None:
-    st.stop()
-st.divider()
-st.subheader(f'③ 왜 「{PL.at[i, "kto_title"]}」인가')
-render_rationale(i, ctx, key='main')
+    # ── 5-3. 선택한 추천 장소의 순위 근거 ──
+    i = st.session_state.get('sel')
+    if i is None:
+        st.stop()
+    st.divider()
+    st.subheader(f'③ 왜 「{PL.at[i, "kto_title"]}」인가')
+    render_rationale(i, ctx, key='main')
 
-# ── 5-4. 이 장소와 비슷한 장소 (지역별) + 고른 장소의 근거 ──
-st.divider()
-st.subheader(f'④ 「{PL.at[i, "kto_title"]}」와 비슷한 장소를 다른 지역에서 찾기')
-c1, c2 = st.columns(2)
-same_group = c1.toggle('같은 유형만', value=True)
-per_region = c2.number_input('시·도별 장소 수', 1, 5, 1)
-sim = similar_places(i, ctx, same_group, int(per_region))
-pick = None
-if sim.empty:
-    st.info('비슷한 장소를 찾지 못했습니다.')
+    # ── 5-6. 모델 설명 ──
+    with st.expander('ℹ️ 이 추천은 어떻게 만들어졌나'):
+        st.markdown('\n'.join([
+            f'- 장소 {N:,}곳의 소개글에서 키워드로 태그를 뽑고, 제품 설명에서도 같은 태그를 뽑아 **축별 적합도**를 계산합니다.',
+            '- 축별 가중치는 실제 장소연계 마케팅 사례로 추정한 조건부 로지스틱 회귀 계수입니다(유명세를 통제한 모형).',
+            '- 유명세(방문자·검색 순위)는 점수의 중심이 아니라, 최소 규모 거르기와 상위 후보 안의 순서 조정(λ)에만 씁니다.',
+            '- 한계: 사례 수가 많지 않아 가중치의 크기보다 **방향**을 믿는 것이 안전하고, 정확히 한 곳을 맞히기보다 **비슷한 유형의 후보를 넓게 보는 용도**에 맞습니다.']))
+        st.write('적합도 가중치:', pd.Series(MD['beta_fit']).rename(index=AX_KO).round(3).to_frame('가중치').T)
+        if len(A['cases']):
+            st.write(f'학습에 쓴 사례 {len(A["cases"])}건')
+            st.dataframe(A['cases'].drop(columns=['pt_idx'], errors='ignore'), hide_index=True, width='stretch')
+
+elif view == MENU[1]:
+    # ── 5-4. 비슷한 장소 (지역별, 8곳씩) + 고른 장소의 근거 ──
+    st.subheader('🔎 비슷한 장소를 다른 지역에서 찾기')
+    base_default = st.session_state.get('sel') if st.session_state.get('sel') is not None else int(res['_i'].iloc[0])
+    st.caption('기준 장소는 메인 화면에서 "근거 보기"로 고른 장소입니다. 검색으로 다른 장소를 기준으로 바꿀 수도 있습니다.')
+    i = place_picker('기준 장소', base_default, 'base')
+    st.markdown(f'**기준 장소: {PL.at[i, "kto_title"]}** · {A["sido"][i]} {A["sgg"][i]} · {A["group"][i]}  {top_chips(i, ctx)}',
+                unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    same_group = c1.toggle('같은 유형만', value=True)
+    per_region = c2.number_input('시·도별 장소 수', 1, 5, 1)
+    sim = similar_places(i, ctx, same_group, int(per_region)).reset_index(drop=True)
+    if sim.empty:
+        st.info('비슷한 장소를 찾지 못했습니다.')
+    else:
+        st.caption('태그 구성이 얼마나 비슷한지(코사인 유사도)로 찾습니다. "제품 적합 순위"는 지금 입력한 제품 기준 전체 순위입니다.')
+        pages = [f'{p * 8 + 1}~{min((p + 1) * 8, len(sim))}' for p in range(-(-len(sim) // 8))]   # 8곳씩 나눠 보기
+        page = st.segmented_control('목록', pages, default=pages[0], key='sim_page') or pages[0]
+        start = int(page.split('~')[0]) - 1
+        part = sim.iloc[start:start + 8]
+        lc, rc = st.columns([3, 2])
+        with lc:
+            st.markdown(part[['시도', '시군구', '장소', '유형', '유사도', '제품 적합 순위', '공통 태그']]
+                        .assign(유사도=lambda d: d['유사도'].round(2)).to_html(escape=False, index=False), unsafe_allow_html=True)
+        with rc:
+            pick = int(st.selectbox('자세히 볼 장소', part['_i'].tolist(), format_func=place_label, key=f'sim_pick_{start}'))
+            st.session_state['sim_pick_val'] = pick                     # 두 장소 비교 메뉴의 기본 B로 씀
+            deck_map([i] + part['_i'].tolist(), highlight=[i, pick], height=420, key=f'map_sim_{start}')
+            st.caption('빨간 점: 기준 장소와 지금 고른 장소. 점에 커서를 올리면 이름이 나옵니다.')
+        # 고른 비슷한 장소의 근거는 메인의 ③과 따로, 이 아래에 보여줌
+        with st.container(border=True):
+            st.markdown(f'#### 「{PL.at[pick, "kto_title"]}」의 근거')
+            render_rationale(pick, ctx, key='sim')
+
 else:
-    st.caption('태그 구성이 얼마나 비슷한지(코사인 유사도)로 찾습니다. "제품 적합 순위"는 지금 입력한 제품 기준 전체 순위입니다.')
+    # ── 5-5. 두 장소 근거 비교 (검색으로 아무 장소나 넣을 수 있음) ──
+    st.subheader('⚖️ 두 장소 근거 비교')
+    st.caption('기본은 메인에서 근거를 본 장소(A)와 "비슷한 장소 찾기"에서 고른 장소(B)입니다. 검색창에 이름을 치면 다른 장소로 바꿀 수 있습니다.')
+    sel = st.session_state.get('sel') if st.session_state.get('sel') is not None else int(res['_i'].iloc[0])
+    b_default = st.session_state.get('sim_pick_val', int(res['_i'].iloc[1]) if len(res) > 1 else sel)
+    pa, pb = st.columns(2)
+    with pa:
+        ia = place_picker('장소 A', sel, 'cmp_a')
+    with pb:
+        ib = place_picker('장소 B', b_default, 'cmp_b')
+
+    CMP_COLOR = {'A': '#2c3e50', 'B': '#e67e22'}
+    ca, cb = st.columns(2)
+    for col, j, lab in [(ca, ia, 'A'), (cb, ib, 'B')]:
+        with col, st.container(border=True):
+            st.markdown(f'<span style="color:{CMP_COLOR[lab]};font-weight:700">장소 {lab}</span> · **{PL.at[j, "kto_title"]}**',
+                        unsafe_allow_html=True)
+            st.caption(f'{PL.at[j, "kto_addr1"] if "kto_addr1" in PL else ""} · {A["group"][j]}')
+            url = photo_url(j)
+            if url:
+                st.image(url, width='stretch')
+            sc, where = score_of(j, ctx)
+            fr = fit_rank_of(j, ctx)
+            m1, m2, m3 = st.columns(3)
+            m1.metric('적합 순위', f'{fr:,}위' if fr else '-')
+            m2.metric('최종 점수', f'{sc:.2f}' if sc is not None else '-', help=where)
+            m3.metric('특색 (z)', f'{ctx["zd"][j]:.2f}')
+            st.markdown(top_chips(j, ctx, 6), unsafe_allow_html=True)
+
+    # 점수 구성을 두 장소 나란히 (막대 색 = 장소)
+    bd = pd.concat([score_breakdown(ia, ctx).assign(장소='A'), score_breakdown(ib, ctx).assign(장소='B')], ignore_index=True)
+    cmp_chart = alt.Chart(bd).mark_bar().encode(
+        x=alt.X('기여:Q', title='최종 점수에 대한 기여'),
+        y=alt.Y('항목:N', sort=None, title=None),
+        yOffset='장소:N',
+        color=alt.Color('장소:N', scale=alt.Scale(domain=['A', 'B'], range=[CMP_COLOR['A'], CMP_COLOR['B']])),
+        tooltip=['장소', '항목', alt.Tooltip('기여:Q', format='.2f')])
     lc, rc = st.columns([3, 2])
     with lc:
-        st.markdown(sim[['시도', '시군구', '장소', '유형', '유사도', '제품 적합 순위', '공통 태그']]
-                    .assign(유사도=lambda d: d['유사도'].round(2)).to_html(escape=False, index=False), unsafe_allow_html=True)
+        st.markdown('**점수 구성 비교**: 막대가 길게 차이 나는 항목이 두 장소의 순위를 가른 이유입니다.')
+        st.altair_chart(cmp_chart + alt.Chart(pd.DataFrame({'x': [0]})).mark_rule(color='gray').encode(x='x:Q'), width='stretch')
     with rc:
-        pick = int(st.selectbox('자세히 볼 장소', sim['_i'].tolist(), format_func=place_label, key='sim_pick'))
-        deck_map([i] + sim['_i'].tolist(), highlight=[i, pick], height=420, key='map_sim')
-        st.caption('빨간 점: 기준 장소와 지금 고른 장소. 점에 커서를 올리면 이름이 나옵니다.')
-    # 고른 비슷한 장소의 근거는 ③과 따로, 이 아래에 보여줌
-    with st.container(border=True):
-        st.markdown(f'#### 🔎 「{PL.at[pick, "kto_title"]}」의 근거')
-        render_rationale(pick, ctx, key='sim')
+        deck_map([ia, ib], labels=['A', 'B'], highlight=[ia], height=360, key='map_cmp')
 
-# ── 5-5. 두 장소 근거 비교 (검색으로 아무 장소나 넣을 수 있음) ──
-st.divider()
-st.subheader('⑤ 두 장소 근거 비교')
-st.caption('기본은 ③의 추천 장소와 ④에서 고른 장소입니다. 검색창에 이름을 치면 다른 장소로 바꿀 수 있습니다.')
-pa, pb = st.columns(2)
-with pa:
-    ia = place_picker('장소 A', i, 'cmp_a')
-with pb:
-    ib = place_picker('장소 B', pick if pick is not None else (int(res['_i'].iloc[1]) if len(res) > 1 else i), 'cmp_b')
+    # 태그별 기여 비교표: 어느 태그에서 차이가 났나
+    ta, tb = tag_contrib(ia, ctx), tag_contrib(ib, ctx)
+    if len(ta) and len(tb):
+        t = ta[['축', '태그', '기여']].merge(tb[['축', '태그', '기여']], on=['축', '태그'], how='outer', suffixes=(' A', ' B')).fillna(0)
+        t['차이 (A−B)'] = t['기여 A'] - t['기여 B']
+        t = t.sort_values('차이 (A−B)', key=abs, ascending=False)
+        mx = float(max(t['기여 A'].max(), t['기여 B'].max(), 1e-9))
+        st.markdown('**태그별 기여 비교** (차이가 큰 태그부터)')
+        st.dataframe(t, hide_index=True, width='stretch', key='cmp_tags',
+                     column_config={'기여 A': st.column_config.ProgressColumn('기여 A', min_value=0, max_value=mx, format='%.2f'),
+                                    '기여 B': st.column_config.ProgressColumn('기여 B', min_value=0, max_value=mx, format='%.2f'),
+                                    '차이 (A−B)': st.column_config.NumberColumn(format='%+.2f')})
 
-CMP_COLOR = {'A': '#2c3e50', 'B': '#e67e22'}
-ca, cb = st.columns(2)
-for col, j, lab in [(ca, ia, 'A'), (cb, ib, 'B')]:
-    with col, st.container(border=True):
-        st.markdown(f'<span style="color:{CMP_COLOR[lab]};font-weight:700">장소 {lab}</span> · **{PL.at[j, "kto_title"]}**',
-                    unsafe_allow_html=True)
-        st.caption(f'{PL.at[j, "kto_addr1"] if "kto_addr1" in PL else ""} · {A["group"][j]}')
-        url = photo_url(j)
-        if url:
-            st.image(url, width='stretch')
-        sc, where = score_of(j, ctx)
-        fr = fit_rank_of(j, ctx)
-        m1, m2, m3 = st.columns(3)
-        m1.metric('적합 순위', f'{fr:,}위' if fr else '-')
-        m2.metric('최종 점수', f'{sc:.2f}' if sc is not None else '-', help=where)
-        m3.metric('특색 (z)', f'{ctx["zd"][j]:.2f}')
-        st.markdown(top_chips(j, ctx, 6), unsafe_allow_html=True)
-
-# 점수 구성을 두 장소 나란히 (막대 색 = 장소)
-bd = pd.concat([score_breakdown(ia, ctx).assign(장소='A'), score_breakdown(ib, ctx).assign(장소='B')], ignore_index=True)
-cmp_chart = alt.Chart(bd).mark_bar().encode(
-    x=alt.X('기여:Q', title='최종 점수에 대한 기여'),
-    y=alt.Y('항목:N', sort=None, title=None),
-    yOffset='장소:N',
-    color=alt.Color('장소:N', scale=alt.Scale(domain=['A', 'B'], range=[CMP_COLOR['A'], CMP_COLOR['B']])),
-    tooltip=['장소', '항목', alt.Tooltip('기여:Q', format='.2f')])
-lc, rc = st.columns([3, 2])
-with lc:
-    st.markdown('**점수 구성 비교**: 막대가 길게 차이 나는 항목이 두 장소의 순위를 가른 이유입니다.')
-    st.altair_chart(cmp_chart + alt.Chart(pd.DataFrame({'x': [0]})).mark_rule(color='gray').encode(x='x:Q'), width='stretch')
-with rc:
-    deck_map([ia, ib], labels=['A', 'B'], highlight=[ia], height=360, key='map_cmp')
-
-# 태그별 기여 비교표: 어느 태그에서 차이가 났나
-ta, tb = tag_contrib(ia, ctx), tag_contrib(ib, ctx)
-if len(ta) and len(tb):
-    t = ta[['축', '태그', '기여']].merge(tb[['축', '태그', '기여']], on=['축', '태그'], how='outer', suffixes=(' A', ' B')).fillna(0)
-    t['차이 (A−B)'] = t['기여 A'] - t['기여 B']
-    t = t.sort_values('차이 (A−B)', key=abs, ascending=False)
-    mx = float(max(t['기여 A'].max(), t['기여 B'].max(), 1e-9))
-    st.markdown('**태그별 기여 비교** (차이가 큰 태그부터)')
-    st.dataframe(t, hide_index=True, width='stretch', key='cmp_tags',
-                 column_config={'기여 A': st.column_config.ProgressColumn('기여 A', min_value=0, max_value=mx, format='%.2f'),
-                                '기여 B': st.column_config.ProgressColumn('기여 B', min_value=0, max_value=mx, format='%.2f'),
-                                '차이 (A−B)': st.column_config.NumberColumn(format='%+.2f')})
-
-# ── 5-6. 모델 설명 ──
-with st.expander('ℹ️ 이 추천은 어떻게 만들어졌나'):
-    st.markdown(f'''
-- 장소 {N:,}곳의 소개글에서 키워드로 태그를 뽑고, 제품 설명에서도 같은 태그를 뽑아 **축별 적합도**를 계산합니다.
-- 축별 가중치는 실제 장소연계 마케팅 사례로 추정한 조건부 로지스틱 회귀 계수입니다(유명세를 통제한 모형).
-- 유명세(방문자·검색 순위)는 점수의 중심이 아니라, 최소 규모 거르기와 상위 후보 안의 순서 조정(λ)에만 씁니다.
-- 한계: 사례 수가 많지 않아 가중치의 크기보다 **방향**을 믿는 것이 안전하고, 정확히 한 곳을 맞히기보다 **비슷한 유형의 후보를 넓게 보는 용도**에 맞습니다.
-''')
-    st.write('적합도 가중치:', pd.Series(MD['beta_fit']).rename(index=AX_KO).round(3).to_frame('가중치').T)
-    if len(A['cases']):
-        st.write(f'학습에 쓴 사례 {len(A["cases"])}건')
-        st.dataframe(A['cases'].drop(columns=['pt_idx'], errors='ignore'), hide_index=True, width='stretch')

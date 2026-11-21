@@ -25,6 +25,21 @@ import streamlit as st
 st.set_page_config(page_title='팝업 장소 추천', page_icon='📍', layout='wide')
 ART = Path(__file__).parent / 'artifacts'
 
+# 화면 꾸미기 (CSS)
+#  - 유형 탭이 많아도 옆으로 스크롤하지 않고 여러 줄로 줄바꿈되게
+#  - '후보 밖' 카드는 key가 out_ 으로 시작하는 상자라서 배경색을 다르게 칠함
+st.markdown('''<style>
+.stTabs [role="tablist"] { flex-wrap: wrap !important; gap: 6px 6px; overflow: visible !important; height: auto !important; }
+.stTabs [role="tablist"] > * { flex-shrink: 0; }
+.stTabs [role="tab"] { padding: 2px 12px !important; border: 1px solid rgba(128,128,128,.35); border-radius: 16px; margin: 0 !important; }
+.stTabs [role="tab"][aria-selected="true"] { background: rgba(214,69,65,.12); border-color: rgba(214,69,65,.75); }
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"], .stTabs .react-aria-SelectionIndicator { display: none !important; }
+[class*="st-key-out_"] { background: #f2f2f2; border-radius: 10px; }
+@media (prefers-color-scheme: dark) { [class*="st-key-out_"] { background: #2b2b2b; } }
+</style>''', unsafe_allow_html=True)
+OUT_BADGE = ('<span style="background:#7f8c8d;color:white;border-radius:10px;padding:1px 8px;font-size:.75rem">'
+             '후보 밖</span>')
+
 # ──────────────────────────────────────────────────────────────
 # 0. 화면에 쓰는 이름과 색
 #    축마다 색을 하나씩 정하고, 기여도가 클수록 진하게(투명도↓) 칠합니다.
@@ -191,7 +206,7 @@ def age_bonus(target_age, w_age, w_top):
     return b
 
 
-def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool=300):
+def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool_type=30):
     """셀 O(연결성 우선) + 셀 P(유형별 묶기) + 셀 Q(연령 가점).
     결과표와 함께, 근거 화면에서 쓸 중간 계산값(ctx)을 돌려줍니다."""
     tags, fired = product_tags(text)
@@ -224,54 +239,42 @@ def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_
     fit_score = np.where(ok, fit_score, -np.inf)
 
     bonus = age_bonus(ages, DEF.get('w_age', .3), DEF.get('w_top', .2))
-    cand = np.argsort(-fit_score)[:pool]
-    cand = cand[np.isfinite(fit_score[cand])]
-    final = np.full(N, -np.inf)
-    final[cand] = fit_score[cand] + lam * crowd[cand] + bonus[cand]   # 후보 안에서만 유동·연령 반영
-
-    picked, cnt = [], Counter()
-    for i in cand[np.argsort(-final[cand])]:
-        key = (A['sido'][i], A['sgg'][i])
-        if cnt[key] >= per_sgg:                         # 한 시군구가 목록을 독차지하지 않게
-            continue
-        cnt[key] += 1
-        picked.append(int(i))
-    big = pd.DataFrame({'_i': picked, '전체 순위': range(1, len(picked) + 1)})
-    big['유형'] = A['group'][big['_i']] if len(big) else []
-    if (big['유형'] != '기타').any():
-        big = big[big['유형'] != '기타']
-    # 모든 유형을 항상 보여줌: 후보(상위 300곳) 안에 있는 유형은 그 안의 순위대로,
-    # 후보 안에 없는 유형도 그 유형 안에서 같은 점수 식으로 상위 장소를 가져와 뒤에 붙임 (점수가 낮아도 표시)
-    first = big.groupby('유형', sort=False)['전체 순위'].min().sort_values()
+    # 유형마다 따로 후보를 뽑음: 그 유형 안에서 적합도 상위 pool_type곳(1차) → 유동·연령을 더해 다시 정렬(2차)
+    #  - 1차가 적합도만 보므로 '유명한 곳이 후보 밖에서 끌려 들어오지 않는다'는 원칙은 그대로
+    #  - 전체에서 300곳을 먼저 뽑던 방식은 점수가 높은 몇몇 유형이 후보를 다 차지해서 다른 유형이 비었음
+    #  - 시군구 제한(per_sgg)도 유형 안에서만 적용: 한 탭이 한 지역으로 채워지지 않게 하면서, 다른 유형 칸은 빼앗지 않음
     score_all = fit_score + lam * crowd + bonus
-    finite = np.isfinite(score_all)
-
-    def fill_rows(g, have):
-        """후보 안에 그 유형이 per_group곳보다 적으면, 후보 밖의 같은 유형 장소로 나머지 칸을 채움"""
-        idx = np.where((A['group'] == g) & finite)[0]
-        idx = [int(j) for j in idx[np.argsort(-score_all[idx])] if int(j) not in have][:per_group - len(have)]
-        return pd.DataFrame({'_i': idx, '유형': g, '후보밖': True,
-                             '전체 순위': [int((score_all[finite] > score_all[j]).sum()) + 1 for j in idx]})
-
-    parts = []
-    for g in first.index:
-        sub = big[big['유형'] == g].sort_values('전체 순위').head(per_group).assign(후보밖=False)
-        if len(sub) < per_group:
-            sub = pd.concat([sub, fill_rows(g, set(sub['_i']))], ignore_index=True)
-        parts.append(sub)
-    extra = []
+    final = np.full(N, -np.inf)
+    parts, best = [], {}
     for g in dict.fromkeys(A['group']):
-        if g == '기타' or g in first.index:
+        if g == '기타':
             continue
-        idx = np.where((A['group'] == g) & finite)[0]
-        if len(idx):
-            top = idx[np.argsort(-score_all[idx])][:per_group]
-            extra.append((score_all[top[0]], g, top))
-    for _, g, top in sorted(extra, key=lambda x: -x[0]):
-        parts.append(pd.DataFrame({'_i': top.astype(int), '유형': g, '후보밖': True,
-                                   '전체 순위': [int((score_all[finite] > score_all[j]).sum()) + 1 for j in top]}))
-    res = pd.concat(parts, ignore_index=True) if parts else big.head(0).assign(후보밖=False)
-    res['유형순위'] = res['유형'].map({g: k for k, g in enumerate(dict.fromkeys(res['유형']), 1)})
+        idx = np.where((A['group'] == g) & np.isfinite(fit_score))[0]
+        if not len(idx):
+            continue
+        cand = idx[np.argsort(-fit_score[idx])][:pool_type]
+        final[cand] = score_all[cand]
+        order = cand[np.argsort(-final[cand])]
+        chosen, cnt = [], Counter()
+        for j in order:
+            key = (A['sido'][j], A['sgg'][j])
+            if cnt[key] >= per_sgg:
+                continue
+            cnt[key] += 1
+            chosen.append(int(j))
+            if len(chosen) >= per_group:
+                break
+        if len(chosen) < per_group:                     # 시군구 제한 때문에 모자라면 제한 없이 채움
+            chosen += [int(j) for j in order if int(j) not in chosen][:per_group - len(chosen)]
+        parts.append(pd.DataFrame({'_i': chosen, '유형': g, '후보밖': False}))
+        best[g] = final[chosen[0]]
+    fin = final[np.isfinite(final)]
+    res = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=['_i', '유형', '후보밖'])
+    res['_i'] = res['_i'].astype(int)
+    res['전체 순위'] = [int((fin > final[j]).sum()) + 1 for j in res['_i']]
+    order_g = sorted(best, key=lambda g: -best[g])          # 유형 순서 = 그 유형 1위 장소의 점수 순
+    res['유형순위'] = res['유형'].map({g: k for k, g in enumerate(order_g, 1)})
+    res = res.sort_values(['유형순위', '전체 순위']).reset_index(drop=True)
     ctx = dict(text=text, month=month, tags=tags, fired=fired, w=w, F=F, beta=beta, fit=fit, zfit=zfit, zd=zd,
                crowd=crowd, bonus=bonus, fit_score=fit_score, final=final, lam=lam, w_distinct=w_distinct, ok=ok)
     return res, ctx
@@ -382,7 +385,8 @@ with st.sidebar:
                             help='0이면 연결성·특색만. 키울수록 유명한 지역이 위로 올라옵니다.')
             w_distinct = st.slider('특색 가중치', 0.0, 1.0, float(DEF.get('w_distinct', .3)), .05)
             min_vis_q = st.slider('방문자 하위 몇 % 시군구 제외', 0.0, 0.8, float(DEF.get('min_vis_q', .3)), .05)
-            per_sgg = st.number_input('한 시군구 최대 장소 수', 1, 10, int(DEF.get('per_sgg', 2)))
+            per_sgg = st.number_input('한 유형 안에서 시군구당 최대 장소 수', 1, 10, int(DEF.get('per_sgg', 2)),
+                                      help='한 유형 탭이 한 지역 장소로만 채워지지 않게 합니다. 유형이 다르면 같은 시군구도 따로 셉니다.')
             per_group = st.number_input('유형별 장소 수', 1, 10, int(DEF.get('per_group', 3)))
         go = st.form_submit_button('추천 받기', type='primary', width='stretch')
     st.markdown('**태그 색 (축)**<br>' + legend_html(), unsafe_allow_html=True)
@@ -430,12 +434,12 @@ def deck_map(idx, labels=None, highlight=None, height=380, key=None):
 
 
 def score_of(i, ctx):
-    """최종 점수. 후보(상위 300곳) 밖이면 같은 식으로 계산해서 보여주고, 거르기에 걸렸으면 None."""
+    """최종 점수. 후보(그 유형의 적합도 상위 30곳) 밖이면 같은 식으로 계산해서 보여주고, 거르기에 걸렸으면 None."""
     if np.isfinite(ctx['final'][i]):
         return float(ctx['final'][i]), '후보 안'
     if not np.isfinite(ctx['fit_score'][i]):
         return None, '거르기 조건(방문자 수·축제 기간·산 이름)에 걸려 추천에서 제외'
-    return float(ctx['fit_score'][i] + ctx['lam'] * ctx['crowd'][i] + ctx['bonus'][i]), '후보(상위 300곳) 밖'
+    return float(ctx['fit_score'][i] + ctx['lam'] * ctx['crowd'][i] + ctx['bonus'][i]), '후보 밖 (그 유형에서 적합도 상위 30곳 밖)'
 
 
 def fit_rank_of(i, ctx):
@@ -590,13 +594,15 @@ if view == MENU[0]:
                 cols = st.columns(len(sub))
                 for col, (_, r) in zip(cols, sub.iterrows()):
                     i = int(r['_i'])
-                    with col, st.container(border=True):
+                    out = not np.isfinite(ctx['final'][i])          # 그 유형의 적합도 상위 30곳 밖이면 '후보 밖'
+                    with col, st.container(border=True, key=f'{"out" if out else "in"}_card_{g}_{i}'):
+                        if out:
+                            st.markdown(OUT_BADGE, unsafe_allow_html=True)
                         url = photo_url(i)
                         if url:
                             st.image(url, width='stretch')
                         st.markdown(f'**{PL.at[i, "kto_title"]}**')
-                        st.caption(f'{PL.at[i, "kto_addr1"] if "kto_addr1" in PL else ""} · 전체 {r["전체 순위"]}위'
-                                   + (' (후보 밖)' if r.get('후보밖', False) else ''))
+                        st.caption(f'{PL.at[i, "kto_addr1"] if "kto_addr1" in PL else ""} · 전체 {r["전체 순위"]}위')
                         st.markdown(top_chips(i, ctx), unsafe_allow_html=True)
                         if st.button('근거 보기', key=f'sel_{g}_{i}', width='stretch',
                                      type='primary' if st.session_state.get('sel') == i else 'secondary'):
@@ -607,6 +613,7 @@ if view == MENU[0]:
                 ranked = type_ranking(g, ctx)
                 if len(ranked) < 50:
                     st.caption(f'이 유형에서 거르기 조건(방문자 수·팝업 월 축제·산 이름)을 통과한 장소가 {len(ranked)}곳이라 {len(ranked)}곳까지 보여줍니다.')
+                st.caption('회색 배경에 "후보 밖" 표시가 있는 곳은 이 유형에서 적합도 상위 30곳 밖이라, 유동인구·연령 점수가 더해져 올라온 장소입니다.')
                 pages = max(1, -(-len(ranked) // 10))
                 page = st.segmented_control('페이지', [f'{p * 10 + 1}~{min((p + 1) * 10, len(ranked))}위' for p in range(pages)],
                                             default=f'1~{min(10, len(ranked))}위', key=f'page_{g}') or f'1~{min(10, len(ranked))}위'
@@ -615,9 +622,10 @@ if view == MENU[0]:
                 lc, rc = st.columns([3, 2])
                 with lc:
                     for n, j in enumerate(shown, start + 1):
-                        with st.container(border=True):
+                        out = not np.isfinite(ctx['final'][j])
+                        with st.container(border=True, key=f'{"out" if out else "in"}_row_{g}_{j}'):
                             a, b = st.columns([5, 1])
-                            a.markdown(f'**{n}. {PL.at[j, "kto_title"]}** <span style="color:gray;font-size:.8rem">'
+                            a.markdown((OUT_BADGE + ' ' if out else '') + f'**{n}. {PL.at[j, "kto_title"]}** <span style="color:gray;font-size:.8rem">'
                                        f'{A["sido"][j]} {A["sgg"][j]}</span><br>{top_chips(j, ctx, 3)}', unsafe_allow_html=True)
                             if b.button('근거', key=f'more_sel_{g}_{j}', type='primary' if st.session_state.get('sel') == j else 'secondary'):
                                 st.session_state['sel'] = j

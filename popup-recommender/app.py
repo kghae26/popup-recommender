@@ -227,7 +227,8 @@ TAG_HELP = {
     'scale:거리·마을·코스': '여러 곳을 걸으며 둘러보는 거리, 마을, 탐방 코스다',
     'scale:대형 야외': '넓은 광장이나 공원, 백사장처럼 탁 트인 대형 야외 공간이다'
 }
-ADDED_W = 0.8   # 사용자가 직접 더한 태그의 가중치
+ADDED_W = 0.8   # 사용자가 직접 더한 태그의 기본 강도
+BOOST_MIN, BOOST_MAX = 0.2, 3.0   # 축 비중 배수의 범위 (한 축이 점수를 독차지하지 않게)
 
 
 def auto_tags(text, industry):
@@ -305,14 +306,32 @@ def age_bonus(target_age, w_age, w_top):
     return b
 
 
-def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool_type=30, tags=None):
+def axis_boost(tags, base):
+    """축 비중 배수 = 그 축 태그의 (사용자 강도 합) ÷ (기본 강도 합).
+    모델은 축 안에서 태그 강도를 가중평균하므로, 강도를 바꾸기만 하면 '축 안의 태그 비율'만 바뀌고
+    축 전체의 무게는 그대로입니다. 그래서 강도를 올린 만큼 그 축의 가중치(β)도 함께 키웁니다.
+    모든 태그를 기본 강도로 두면 배수가 1이라 노트북 모델과 똑같이 계산됩니다."""
+    out = {}
+    if not base:
+        return out
+    for ax in MD['ax_cols']:
+        ks = [k for k in tags if k.startswith(ax + ':')]
+        b = sum(base.get(k, ADDED_W) for k in ks)
+        if ks and b > 0:
+            out[ax] = float(np.clip(sum(tags[k] for k in ks) / b, BOOST_MIN, BOOST_MAX))
+    return out
+
+
+def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool_type=30, tags=None, base=None):
     """셀 O(연결성 우선) + 셀 P(유형별 묶기) + 셀 Q(연령 가점).
+    tags: 계산에 쓸 태그 강도 (사용자가 고친 값), base: 그 태그들의 기본 강도 (축 비중 배수 계산용).
     결과표와 함께, 근거 화면에서 쓸 중간 계산값(ctx)을 돌려줍니다."""
     auto, fired = product_tags(text)
     tags = dict(tags) if tags is not None else auto        # 사용자가 고친 태그가 있으면 그것을 씀
     w = weight_vector(tags)
     F = axis_features(w, month)
-    beta = {k: v for k, v in MD['beta_fit'].items() if k in F}
+    boost = axis_boost(tags, base)
+    beta = {k: v * boost.get(k, 1.0) for k, v in MD['beta_fit'].items() if k in F}   # 강도를 올린 축은 β도 키움
     fit = sum(b * F[k] for k, b in beta.items()) if beta else np.zeros(N)
     zfit = zs(fit)
     cap = DEF.get('distinct_cap', 3.0)
@@ -376,7 +395,8 @@ def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_
     res['유형순위'] = res['유형'].map({g: k for k, g in enumerate(order_g, 1)})
     res = res.sort_values(['유형순위', '전체 순위']).reset_index(drop=True)
     ctx = dict(text=text, month=month, tags=tags, fired=fired, w=w, F=F, beta=beta, fit=fit, zfit=zfit, zd=zd,
-               crowd=crowd, bonus=bonus, fit_score=fit_score, final=final, lam=lam, w_distinct=w_distinct, ok=ok)
+               crowd=crowd, bonus=bonus, fit_score=fit_score, final=final, lam=lam, w_distinct=w_distinct, ok=ok,
+               boost=boost)
     return res, ctx
 
 
@@ -463,7 +483,7 @@ def latlon(idx):
 
 
 # ──────────────────────────────────────────────────────────────
-# 5. 화면: 사이드바(메뉴·축 설명) / 메인(입력) → 제품 태그 → 유형별 추천(더보기) → 선택 장소 근거 → 비슷한 장소 → 두 장소 비교
+# 5. 화면: 사이드바(메뉴·축 설명) / 메인(입력) → 제품 태그 고르기·강도 → 유형별 추천(더보기) → 선택 장소 근거 → 비슷한 장소 → 두 장소 비교
 # ──────────────────────────────────────────────────────────────
 st.title('📍 팝업스토어 장소 추천')
 st.caption('유명해서가 아니라 **제품과 연결되기 때문에** 추천합니다. 유명세는 최소 규모 거르기와 후보 안 순서 조정에만 씁니다.')
@@ -489,7 +509,7 @@ with st.sidebar:
             '더 많은 태그가 붙어서 더 다양한 유형의 장소를 추천받을 수 있어요.')
 
 # 입력값: 마지막으로 '추천 받기'를 누른 값을 기억해 두었다가, 다른 메뉴에 다녀와도 그대로 보여줌
-DEFAULT_INPUTS = dict(industry='선택 안 함', text='핸드메이드 입욕제·비누·바디케어 제품을 판다.', tags=None, auto_tags=None, month=7, ages=['20대', '30대'], goal='balanced',
+DEFAULT_INPUTS = dict(industry='선택 안 함', text='핸드메이드 입욕제·비누·바디케어 제품을 판다.', tags=None, base=None, auto_tags=None, month=7, ages=['20대', '30대'], goal='balanced',
                       lam=float(DEF.get('lam', .2)), w_distinct=float(DEF.get('w_distinct', .3)),
                       min_vis_q=float(DEF.get('min_vis_q', .3)), per_sgg=int(DEF.get('per_sgg', 2)),
                       per_group=int(DEF.get('per_group', 3)))
@@ -504,7 +524,7 @@ def input_form(v):
             industry = st.selectbox('업종 (선택하면 기본 태그를 먼저 채워요)', list(INDUSTRY_PRESETS),
                                     index=list(INDUSTRY_PRESETS).index(v.get('industry', '선택 안 함')))
             text = st.text_area('제품·서비스 설명', v['text'], height=100,
-                                help='제품이 무엇인지, 어떤 상황에서 쓰는지를 적을수록 태그가 잘 붙습니다. 놓친 태그는 아래 ①에서 직접 고를 수 있어요.')
+                                help='제품이 무엇인지, 어떤 상황에서 쓰는지를 적을수록 태그가 잘 붙습니다. 놓친 태그와 강도는 바로 아래 ①에서 고칠 수 있어요.')
         with c2:
             months = [None] + list(range(1, 13))
             month = st.selectbox('팝업 월', months, index=months.index(v['month']),
@@ -535,7 +555,9 @@ if view == MENU[0]:
         auto, _ = auto_tags(new_inp['text'], new_inp['industry'])
         # 설명·업종이 그대로면 사용자가 고친 태그를 유지, 바뀌었으면 다시 자동으로 읽음
         new_inp['auto_tags'] = auto
-        new_inp['tags'] = INP['tags'] if same and INP.get('tags') is not None else auto
+        keep = same and INP.get('tags') is not None
+        new_inp['tags'] = INP['tags'] if keep else auto
+        new_inp['base'] = INP.get('base') if keep else None
         INP = new_inp
 
 # 버튼을 누르면 계산해서 세션에 저장 → 장소를 클릭하거나 메뉴를 옮겨도 다시 계산하지 않음
@@ -543,7 +565,8 @@ if go or st.session_state.pop('recalc', False) or 'res' not in st.session_state:
     with st.spinner('장소 점수를 계산하는 중...'):
         res, ctx = recommend(INP['text'], INP['month'], INP['ages'], INP['goal'], INP['lam'], INP['w_distinct'],
                              INP['min_vis_q'], INP['per_sgg'], INP['per_group'],
-                             tags=INP.get('tags') if INP.get('tags') is not None else auto_tags(INP['text'], INP.get('industry', '선택 안 함'))[0])
+                             tags=INP.get('tags') if INP.get('tags') is not None else auto_tags(INP['text'], INP.get('industry', '선택 안 함'))[0],
+                             base=INP.get('base'))
     st.session_state.update(res=res, ctx=ctx, inputs=INP, sel=int(res['_i'].iloc[0]) if len(res) else None)
 res, ctx = st.session_state['res'], st.session_state['ctx']
 if res.empty and view != MENU[0]:
@@ -712,10 +735,13 @@ def place_picker(label, default, key):
 
 
 if view == MENU[0]:
-    # ── 5-1. 제품 설명에서 뽑은 태그 + 설명 보완 도우미 ──
-    st.subheader('① 제품 태그 (자동으로 읽고, 직접 고칠 수 있어요)')
+    # ── 5-1. 제품 태그: 자동으로 읽은 태그를 보여 주고, 축별로 더하거나 빼고, 태그마다 강도를 조절 ──
+    auto_t = INP.get('auto_tags') or auto_tags(INP['text'], INP.get('industry', '선택 안 함'))[0]
+    st.subheader('① 제품 태그 고르기 · 강도 조절')
+    st.caption('자동으로 읽은 태그가 미리 골라져 있어요. 태그를 더하거나 빼고 강도를 바꾼 뒤 '
+               '**"이 태그·강도로 다시 추천"**을 누르면 아래 ② 추천이 바뀝니다.')
     if not ctx['tags']:
-        st.warning('설명에서 태그를 하나도 못 찾았습니다. 위에서 업종을 고르거나, 아래 "태그 직접 고르기"에서 태그를 골라 주세요.')
+        st.warning('설명에서 태그를 하나도 못 찾았습니다. 위에서 업종을 고르거나, 아래 칸에서 축마다 태그를 골라 주세요.')
     else:
         # 설명 문장 안에서 태그를 만든 단어를 그 축 색으로 칠해서 보여줌
         shown = ctx['text']
@@ -724,37 +750,77 @@ if view == MENU[0]:
             r, g, b = AX_RGB.get(ax, (120, 120, 120))
             shown = shown.replace(f['word'], f'<b style="background:rgba({r},{g},{b},.25);border-radius:4px;padding:0 3px">{f["word"]}</b>', 1)
         st.markdown(f'> {shown}', unsafe_allow_html=True)
-        chips = ' '.join(chip(f'{AX_KO[k.split(":")[0]]} · {k.split(":")[1]}', k.split(':')[0], v, f'가중치 {v}')
-                         for k, v in sorted(ctx['tags'].items(), key=lambda x: (list(AX_KO).index(x[0].split(':')[0]), -x[1])))
-        st.markdown(chips, unsafe_allow_html=True)
-        st.caption('색이 진할수록 제품에서 강하게 읽힌 태그입니다. 태그는 장소 소개글의 태그와 비교되어 "축별 적합도"가 됩니다.')
 
-    # 태그 직접 고르기: 자동으로 읽은 태그가 미리 선택돼 있고, 빼거나 더한 뒤 다시 추천받음
-    auto_t = INP.get('auto_tags') or auto_tags(INP['text'], INP.get('industry', '선택 안 함'))[0]
-    _tv = abs(hash(tuple(sorted(ctx['tags'])))) % 10**8          # 태그가 바뀌면 고르기 칸도 새로 그리도록
-    with st.expander('🏷️ 태그 직접 고르기: 놓친 태그를 더하거나 맞지 않는 태그를 빼세요', expanded=not ctx['tags']):
-        st.caption('사전에 없는 표현은 자동으로 못 읽어요. 축마다 제품과 맞는 태그를 골라 주세요. '
-                   '자동으로 읽은 태그는 그 강도를, 직접 더한 태그는 0.8을 가중치로 씁니다. 계절은 팝업 월로 정해집니다.')
-        with st.form('tag_edit'):
-            cols = st.columns(2); picked = []
-            axes_edit = [a for a in AX_KO if a in MD['ax_cols']]
-            for n, ax in enumerate(axes_edit):
-                opts = [c for c in TAG_COLS if c.startswith(ax + ':')]
-                cur = [c for c in opts if c in ctx['tags']]
-                picked += cols[n % 2].multiselect(f'{AX_KO[ax]}', opts, default=cur, key=f'tagsel_{ax}_{_tv}', placeholder='태그를 골라 주세요',
-                                                  format_func=lambda c: c.split(':')[1],
-                                                  help=' / '.join(f"{c.split(':')[1]}: {TAG_HELP.get(c, '')}" for c in opts))
-            if st.form_submit_button('고른 태그로 다시 추천', type='primary'):
-                INP['tags'] = {c: ctx['tags'].get(c, auto_t.get(c, ADDED_W)) for c in picked}
-                st.session_state['inputs'] = INP; st.session_state['recalc'] = True
-                st.rerun()
+    _tv = abs(hash(tuple(sorted(ctx['tags'].items())))) % 10**8    # 추천을 다시 계산하면 고르기 칸도 새 값으로 다시 그림
+    axes_edit = [a for a in AX_KO if a in MD['ax_cols']]
+    ax_order = {a: n for n, a in enumerate(axes_edit)}
+    with st.container(border=True):
+        # (1) 축별 태그 고르기: 고르는 즉시 아래 강도 칸이 늘거나 줄어듦 (추천 계산은 버튼을 눌러야 함)
+        st.markdown('**🏷️ 축별 태그 고르기**')
+        cols = st.columns(4)
+        picked = []
+        for n, ax in enumerate(axes_edit):
+            opts = [c for c in TAG_COLS if c.startswith(ax + ':')]
+            cur = [c for c in opts if c in ctx['tags']]
+            picked += cols[n % 4].multiselect(AX_KO[ax], opts, default=cur, key=f'tagsel_{ax}_{_tv}', placeholder='태그 고르기',
+                                              format_func=lambda c: c.split(':')[1],
+                                              help=' / '.join(f"{c.split(':')[1]}: {TAG_HELP.get(c, '')}" for c in opts))
+        picked = sorted(picked, key=lambda c: (ax_order[c.split(':')[0]], -ctx['tags'].get(c, 0)))
+
+        # (2) 태그별 강도: form 안에 둬서 슬라이더를 움직일 때마다 화면을 다시 그리지 않음
+        with st.form('tag_strength', border=False):
+            st.markdown('**🎚️ 태그 강도** <span style="color:gray;font-size:.8rem">0.1 약하게 · 1.0 강하게 · 2.0 아주 강하게</span>',
+                        unsafe_allow_html=True)
+            strength = {}
+            if not picked:
+                st.caption('위에서 태그를 하나 이상 골라 주세요.')
+            scols = st.columns(3)
+            for n, c in enumerate(picked):
+                ax, name = c.split(':')
+                base_c = float(auto_t.get(c, ADDED_W))
+                cur = float(np.clip(round(ctx['tags'].get(c, base_c) * 20) / 20, 0.1, 2.0))
+                strength[c] = scols[n % 3].slider(f'{AX_KO[ax]} · {name}', 0.1, 2.0, cur, 0.05, key=f'str_{c}_{_tv}',
+                                                  help=f'{TAG_HELP.get(c, "")} (기본 강도 {base_c:.2f}'
+                                                       + (', 자동으로 읽은 태그)' if c in auto_t else ', 직접 더한 태그)'))
+            b1, b2 = st.columns([3, 1])
+            go_tags = b1.form_submit_button('이 태그·강도로 다시 추천', type='primary', width='stretch')
+            reset = b2.form_submit_button('자동 태그로 되돌리기', width='stretch')
+        if go_tags or reset:
+            if reset:
+                INP['tags'], INP['base'] = dict(auto_t), None
+            else:
+                INP['tags'] = {c: float(v) for c, v in strength.items()}
+                INP['base'] = {c: float(auto_t.get(c, ADDED_W)) for c in strength}
+            st.session_state['inputs'] = INP
+            st.session_state['recalc'] = True
+            st.rerun()
+
+        if set(picked) != set(ctx['tags']):
+            st.warning('고른 태그가 바뀌었어요. **"이 태그·강도로 다시 추천"**을 눌러야 ② 추천에 반영됩니다.')
+        neg = [AX_KO[a] for a in axes_edit if MD['beta_fit'].get(a, 0) < 0 and any(c.startswith(a + ':') for c in picked)]
+        st.caption('강도는 두 가지로 작동해요. ① 같은 축 안에서는 강도 비율대로 태그가 섞이고, ② 기본보다 올리면 그 축이 점수에서 '
+                   f'차지하는 비중도 같이 커져요 (×{BOOST_MIN}~×{BOOST_MAX}). 모든 태그가 기본 강도면 원래 모델과 똑같이 계산합니다.'
+                   + (f' ※ {", ".join(neg)} 축은 사례 모형의 가중치가 음수라, 강도를 올리면 그 태그가 강한 장소가 오히려 내려가요.' if neg else ''))
+
+        # 지금 추천에 쓰인 태그와 강도, 축 비중
+        if ctx['tags']:
+            chips = ' '.join(chip(f'{AX_KO[k.split(":")[0]]} · {k.split(":")[1]} {v:.2f}', k.split(':')[0], min(v, 1), f'강도 {v:.2f}')
+                             for k, v in sorted(ctx['tags'].items(), key=lambda x: (ax_order.get(x[0].split(':')[0], 99), -x[1])))
+            st.markdown('**지금 추천에 쓴 태그** ' + chips, unsafe_allow_html=True)
+        n_add = len(set(ctx['tags']) - set(auto_t)); n_del = len(set(auto_t) - set(ctx['tags']))
+        n_str = sum(1 for k, v in ctx['tags'].items() if k in auto_t and abs(v - auto_t[k]) > 1e-6)
+        boosted = {a: m for a, m in ctx.get('boost', {}).items() if abs(m - 1) > 1e-3}
+        notes = []
+        if n_add or n_del or n_str:
+            notes.append(f'직접 고친 태그로 계산했어요 (더한 태그 {n_add}개, 뺀 태그 {n_del}개, 강도를 바꾼 태그 {n_str}개).')
+        if boosted:
+            notes.append('축 비중: ' + ', '.join(f'{AX_KO[a]} ×{m:.2f}' for a, m in boosted.items()))
+        if notes:
+            st.caption(' '.join(notes))
         with st.popover('태그 뜻 전체 보기'):
-            for ax in [a for a in AX_KO if a in MD['ax_cols']]:
+            for ax in axes_edit:
                 st.markdown(f'**{AX_KO[ax]}**  \n' + '  \n'.join(f"· {c.split(':')[1]}: {TAG_HELP.get(c, '')}"
                                                               for c in TAG_COLS if c.startswith(ax + ':')))
-        n_add = len(set(ctx['tags']) - set(auto_t)); n_del = len(set(auto_t) - set(ctx['tags']))
-        if n_add or n_del:
-            st.caption(f'지금 추천은 직접 고친 태그로 계산했어요 (더한 태그 {n_add}개, 뺀 태그 {n_del}개).')
 
     with st.expander('✍️ 설명 보완 도우미: 이런 단어를 넣으면 이런 태그가 붙어요'):
         used_axes = {k.split(':')[0] for k in ctx['tags']}
@@ -770,7 +836,10 @@ if view == MENU[0]:
                          '새 축': ', '.join(AX_KO[a] for a in axes - used_axes) or '-',
                          '_w': max(beta.get(a, 0) for a in axes) + (1 if axes - used_axes else 0)})
         rows = sorted(rows, key=lambda r: -r['_w'])[:12]
-        st.markdown(pd.DataFrame(rows).drop(columns='_w').to_html(escape=False, index=False), unsafe_allow_html=True)
+        if rows:
+            st.markdown(pd.DataFrame(rows).drop(columns='_w').to_html(escape=False, index=False), unsafe_allow_html=True)
+        else:
+            st.caption('설명이 이미 모든 예시 단어를 쓰고 있어요.')
 
     # ── 5-2. 유형별 추천 목록 (기본 3곳, 더보기를 켜면 상위 50곳 목록 + 지도) ──
     st.subheader('② 유형별 추천')

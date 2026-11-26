@@ -157,6 +157,87 @@ def product_tags(text):
     return tags, fired
 
 
+# 업종 빠른 선택: 고르면 그 업종의 기본 태그 묶음을 먼저 채움 (설명에서 읽은 태그와 합침)
+INDUSTRY_PRESETS = {
+    '선택 안 함': {},
+    '의류·패션': {'aesthetic:모던·도시': .6, 'audience:2030': .7, 'situation:사진·기록': .5, 'scale:거리·마을·코스': .4},
+    '아웃도어·스포츠': {'situation:땀·운동': 1, 'aesthetic:자연경관': .8, 'scale:거리·마을·코스': .6, 'value:친환경·자연보호': .4},
+    '뷰티·화장품': {'value:건강·웰니스': .6, 'audience:2030': .7, 'situation:휴식·힐링': .5, 'material:향': .5, 'situation:사진·기록': .4},
+    '식품·음료': {'situation:식사·미식': .9, 'situation:쇼핑·선물': .5, 'situation:햇빛·더위': .3},
+    '주류': {'situation:야간': .8, 'material:음악·공연': .6, 'situation:식사·미식': .5, 'audience:2030': .6, 'scale:대형 야외': .5},
+    '카페·차': {'material:차·커피': 1, 'situation:휴식·힐링': .7, 'situation:사진·기록': .4},
+    'IT·가전·통신': {'value:기술·미래': 1, 'situation:학습·체험': .6, 'situation:사진·기록': .5, 'audience:2030': .5},
+    '자동차·모빌리티': {'situation:이동·드라이브': 1, 'aesthetic:자연경관': .6, 'situation:숙박·체류': .4},
+    '금융·결제': {'situation:쇼핑·선물': .6, 'value:로컬·상생': .5, 'audience:2030': .5, 'situation:대기·혼잡': .3},
+    '게임·콘텐츠·캐릭터': {'audience:2030': .8, 'material:빛·미디어': .6, 'audience:가족·어린이': .5, 'situation:사진·기록': .6, 'value:예술·창작': .4},
+    '생활용품·리빙': {'situation:휴식·힐링': .6, 'situation:숙박·체류': .5, 'aesthetic:모던·도시': .4, 'value:가족·공동체': .4},
+    '유아·키즈': {'audience:가족·어린이': 1, 'value:가족·공동체': .7, 'situation:학습·체험': .6},
+    '반려동물': {'audience:반려동물': 1, 'scale:거리·마을·코스': .6, 'situation:땀·운동': .4, 'aesthetic:자연경관': .4},
+    '여행·숙박': {'situation:숙박·체류': 1, 'situation:이동·드라이브': .6, 'situation:휴식·힐링': .6, 'audience:외국인': .4},
+    '전통·공예': {'value:전통·역사': 1, 'aesthetic:한옥·전통미': .8, 'value:예술·창작': .6, 'situation:학습·체험': .5},
+    '친환경 브랜드': {'value:친환경·자연보호': 1, 'issue:환경문제': .7, 'material:꽃·식물': .5, 'value:로컬·상생': .4},
+}
+# 태그 고르기 화면에서 보여 줄 태그 뜻 (노트북 셀 1-4의 태그 설명 문장)
+TAG_HELP = {
+    'situation:젖음·물놀이': '물에 들어가 수영하거나 물놀이를 즐길 수 있는 곳',
+    'situation:땀·운동': '산을 오르거나 걷고 달리며 땀을 흘리는 곳',
+    'situation:햇빛·더위': '한여름 뜨거운 햇볕 아래에서 시간을 보내는 곳',
+    'situation:추위·겨울': '추운 겨울에 눈과 얼음을 즐기는 곳',
+    'situation:대기·혼잡': '사람이 몰려 오래 줄을 서고 기다려야 하는 곳',
+    'situation:야간': '밤에 야경이나 불빛을 보러 가는 곳',
+    'situation:휴식·힐링': '조용히 쉬면서 몸과 마음을 회복하는 곳',
+    'situation:사진·기록': '사진을 찍기 좋은 포토존과 전망이 있는 곳',
+    'situation:이동·드라이브': '차를 타고 경치 좋은 길을 달리며 즐기는 곳',
+    'situation:숙박·체류': '하룻밤 이상 머물며 캠핑이나 숙박을 하는 곳',
+    'situation:식사·미식': '지역 음식과 맛집을 찾아 먹으러 가는 곳',
+    'situation:쇼핑·선물': '물건을 사고 기념품이나 선물을 고르는 곳',
+    'situation:학습·체험': '직접 만들어 보거나 배우는 체험 프로그램이 있는 곳',
+    'material:물·바다': '바다, 강, 호수, 계곡처럼 물이 중심인 경관이다',
+    'material:머드·흙': '갯벌이나 진흙, 황토를 만지고 체험하는 곳',
+    'material:꽃·식물': '꽃과 나무, 정원이 아름다운 곳',
+    'material:차·커피': '차밭이나 다원에서 차를 마시고 배우는 곳',
+    'material:향': '꽃과 허브의 향기가 가득한 곳',
+    'material:빛·미디어': '조명과 미디어아트로 빛을 연출한 곳',
+    'material:음악·공연': '음악 공연과 콘서트가 열리는 곳',
+    'material:나무·목재': '울창한 나무와 숲, 목조 건물이 있는 곳',
+    'material:식재료': '지역에서 나는 농산물과 특산 식재료가 유명한 곳',
+    'value:친환경·자연보호': '자연 생태를 보호하고 환경을 생각하는 곳',
+    'value:전통·역사': '오랜 역사와 전통문화가 남아 있는 곳',
+    'value:로컬·상생': '마을 주민과 지역 상인이 함께 꾸려 가는 곳',
+    'value:예술·창작': '예술 작품을 전시하고 작가들이 창작하는 곳',
+    'value:기술·미래': '첨단 과학기술과 미래를 보여 주는 곳',
+    'value:건강·웰니스': '건강을 돌보고 몸을 치유하는 곳',
+    'value:가족·공동체': '가족이 함께 시간을 보내기 좋은 곳',
+    'issue:쇠퇴·재생': '낡은 원도심이나 옛 건물을 새롭게 바꾼 곳',
+    'issue:유휴공간': '문을 닫은 폐교, 폐공장, 폐역을 다른 용도로 쓰는 곳',
+    'issue:환경문제': '쓰레기, 오염, 기후변화 같은 환경 문제를 다루는 곳',
+    'issue:오지·인프라부족': '교통이 불편하고 외딴 산골이나 섬마을이다',
+    'issue:전통시장': '오래된 전통시장과 오일장이 서는 곳',
+    'aesthetic:한옥·전통미': '기와지붕 한옥과 정자가 늘어선 고즈넉한 곳',
+    'aesthetic:근대건축': '개항기와 일제강점기의 근대 건축물이 남아 있는 곳',
+    'aesthetic:산업유산': '옛 공장, 탄광, 조선소 같은 산업 시설이 남아 있는 곳',
+    'aesthetic:레트로': '옛날 추억과 복고 감성을 느낄 수 있는 곳',
+    'aesthetic:자연경관': '기암절벽과 협곡처럼 웅장한 자연 경관이 있는 곳',
+    'aesthetic:모던·도시': '현대적인 건축과 도심 랜드마크가 있는 곳',
+    'audience:2030': '젊은 20대와 30대가 많이 찾는 핫플레이스다',
+    'audience:가족·어린이': '아이와 함께 가기 좋은 가족 여행지다',
+    'audience:커플': '연인과 데이트하기 좋은 곳',
+    'audience:외국인': '외국인 관광객이 많이 찾는 곳',
+    'audience:반려동물': '반려견과 함께 갈 수 있는 곳',
+    'scale:거리·마을·코스': '여러 곳을 걸으며 둘러보는 거리, 마을, 탐방 코스다',
+    'scale:대형 야외': '넓은 광장이나 공원, 백사장처럼 탁 트인 대형 야외 공간이다'
+}
+ADDED_W = 0.8   # 사용자가 직접 더한 태그의 가중치
+
+
+def auto_tags(text, industry):
+    """업종 기본 태그 + 설명에서 규칙으로 읽은 태그 (같은 태그면 큰 값)"""
+    tags, fired = product_tags(text)
+    for k, v in INDUSTRY_PRESETS.get(industry, {}).items():
+        if k in TAG_COLS: tags[k] = max(tags.get(k, 0), v)
+    return tags, fired
+
+
 def weight_vector(tags):
     w = np.zeros(len(TAG_COLS), np.float32)
     for k, v in tags.items():
@@ -224,10 +305,11 @@ def age_bonus(target_age, w_age, w_top):
     return b
 
 
-def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool_type=30):
+def recommend(text, month, ages, goal, lam, w_distinct, min_vis_q, per_sgg, per_group, pool_type=30, tags=None):
     """셀 O(연결성 우선) + 셀 P(유형별 묶기) + 셀 Q(연령 가점).
     결과표와 함께, 근거 화면에서 쓸 중간 계산값(ctx)을 돌려줍니다."""
-    tags, fired = product_tags(text)
+    auto, fired = product_tags(text)
+    tags = dict(tags) if tags is not None else auto        # 사용자가 고친 태그가 있으면 그것을 씀
     w = weight_vector(tags)
     F = axis_features(w, month)
     beta = {k: v for k, v in MD['beta_fit'].items() if k in F}
@@ -407,7 +489,7 @@ with st.sidebar:
             '더 많은 태그가 붙어서 더 다양한 유형의 장소를 추천받을 수 있어요.')
 
 # 입력값: 마지막으로 '추천 받기'를 누른 값을 기억해 두었다가, 다른 메뉴에 다녀와도 그대로 보여줌
-DEFAULT_INPUTS = dict(text='핸드메이드 입욕제·비누·바디케어 제품을 판다.', month=7, ages=['20대', '30대'], goal='balanced',
+DEFAULT_INPUTS = dict(industry='선택 안 함', text='핸드메이드 입욕제·비누·바디케어 제품을 판다.', tags=None, auto_tags=None, month=7, ages=['20대', '30대'], goal='balanced',
                       lam=float(DEF.get('lam', .2)), w_distinct=float(DEF.get('w_distinct', .3)),
                       min_vis_q=float(DEF.get('min_vis_q', .3)), per_sgg=int(DEF.get('per_sgg', 2)),
                       per_group=int(DEF.get('per_group', 3)))
@@ -419,8 +501,10 @@ def input_form(v):
     with st.form('input'):
         c1, c2 = st.columns([3, 2])
         with c1:
-            text = st.text_area('제품·서비스 설명', v['text'], height=128,
-                                help='제품이 무엇인지, 어떤 상황에서 쓰는지를 적을수록 태그가 잘 붙습니다.')
+            industry = st.selectbox('업종 (선택하면 기본 태그를 먼저 채워요)', list(INDUSTRY_PRESETS),
+                                    index=list(INDUSTRY_PRESETS).index(v.get('industry', '선택 안 함')))
+            text = st.text_area('제품·서비스 설명', v['text'], height=100,
+                                help='제품이 무엇인지, 어떤 상황에서 쓰는지를 적을수록 태그가 잘 붙습니다. 놓친 태그는 아래 ①에서 직접 고를 수 있어요.')
         with c2:
             months = [None] + list(range(1, 13))
             month = st.selectbox('팝업 월', months, index=months.index(v['month']),
@@ -439,7 +523,7 @@ def input_form(v):
         st.caption('💡 왼쪽 축 칩에 커서를 올려 보고, 그 관점(쓰는 상황·소재·가치·분위기·타깃)으로 제품과 기획 의도를 적으면 '
                    '더 다양한 추천을 받을 수 있어요. 예: "여름 물놀이 뒤 씻고 쉬는 순간을 위한, 향이 진한 핸드메이드 입욕제"')
         go = st.form_submit_button('추천 받기', type='primary', width='stretch')
-    return go, dict(text=text, month=month, ages=ages, goal=goal, lam=lam, w_distinct=w_distinct,
+    return go, dict(industry=industry, text=text, month=month, ages=ages, goal=goal, lam=lam, w_distinct=w_distinct,
                     min_vis_q=min_vis_q, per_sgg=int(per_sgg), per_group=int(per_group))
 
 
@@ -447,13 +531,19 @@ go = False
 if view == MENU[0]:
     go, new_inp = input_form(INP)
     if go:
+        same = new_inp['text'] == INP.get('text') and new_inp['industry'] == INP.get('industry', '선택 안 함')
+        auto, _ = auto_tags(new_inp['text'], new_inp['industry'])
+        # 설명·업종이 그대로면 사용자가 고친 태그를 유지, 바뀌었으면 다시 자동으로 읽음
+        new_inp['auto_tags'] = auto
+        new_inp['tags'] = INP['tags'] if same and INP.get('tags') is not None else auto
         INP = new_inp
 
 # 버튼을 누르면 계산해서 세션에 저장 → 장소를 클릭하거나 메뉴를 옮겨도 다시 계산하지 않음
-if go or 'res' not in st.session_state:
+if go or st.session_state.pop('recalc', False) or 'res' not in st.session_state:
     with st.spinner('장소 점수를 계산하는 중...'):
         res, ctx = recommend(INP['text'], INP['month'], INP['ages'], INP['goal'], INP['lam'], INP['w_distinct'],
-                             INP['min_vis_q'], INP['per_sgg'], INP['per_group'])
+                             INP['min_vis_q'], INP['per_sgg'], INP['per_group'],
+                             tags=INP.get('tags') if INP.get('tags') is not None else auto_tags(INP['text'], INP.get('industry', '선택 안 함'))[0])
     st.session_state.update(res=res, ctx=ctx, inputs=INP, sel=int(res['_i'].iloc[0]) if len(res) else None)
 res, ctx = st.session_state['res'], st.session_state['ctx']
 if res.empty and view != MENU[0]:
@@ -623,9 +713,9 @@ def place_picker(label, default, key):
 
 if view == MENU[0]:
     # ── 5-1. 제품 설명에서 뽑은 태그 + 설명 보완 도우미 ──
-    st.subheader('① 제품 설명에서 읽은 태그')
+    st.subheader('① 제품 태그 (자동으로 읽고, 직접 고칠 수 있어요)')
     if not ctx['tags']:
-        st.warning('설명에서 태그를 하나도 못 찾았습니다. 아래 "설명 보완 도우미"의 단어를 참고해 설명을 고쳐 보세요.')
+        st.warning('설명에서 태그를 하나도 못 찾았습니다. 위에서 업종을 고르거나, 아래 "태그 직접 고르기"에서 태그를 골라 주세요.')
     else:
         # 설명 문장 안에서 태그를 만든 단어를 그 축 색으로 칠해서 보여줌
         shown = ctx['text']
@@ -638,6 +728,33 @@ if view == MENU[0]:
                          for k, v in sorted(ctx['tags'].items(), key=lambda x: (list(AX_KO).index(x[0].split(':')[0]), -x[1])))
         st.markdown(chips, unsafe_allow_html=True)
         st.caption('색이 진할수록 제품에서 강하게 읽힌 태그입니다. 태그는 장소 소개글의 태그와 비교되어 "축별 적합도"가 됩니다.')
+
+    # 태그 직접 고르기: 자동으로 읽은 태그가 미리 선택돼 있고, 빼거나 더한 뒤 다시 추천받음
+    auto_t = INP.get('auto_tags') or auto_tags(INP['text'], INP.get('industry', '선택 안 함'))[0]
+    _tv = abs(hash(tuple(sorted(ctx['tags'])))) % 10**8          # 태그가 바뀌면 고르기 칸도 새로 그리도록
+    with st.expander('🏷️ 태그 직접 고르기: 놓친 태그를 더하거나 맞지 않는 태그를 빼세요', expanded=not ctx['tags']):
+        st.caption('사전에 없는 표현은 자동으로 못 읽어요. 축마다 제품과 맞는 태그를 골라 주세요. '
+                   '자동으로 읽은 태그는 그 강도를, 직접 더한 태그는 0.8을 가중치로 씁니다. 계절은 팝업 월로 정해집니다.')
+        with st.form('tag_edit'):
+            cols = st.columns(2); picked = []
+            axes_edit = [a for a in AX_KO if a in MD['ax_cols']]
+            for n, ax in enumerate(axes_edit):
+                opts = [c for c in TAG_COLS if c.startswith(ax + ':')]
+                cur = [c for c in opts if c in ctx['tags']]
+                picked += cols[n % 2].multiselect(f'{AX_KO[ax]}', opts, default=cur, key=f'tagsel_{ax}_{_tv}', placeholder='태그를 골라 주세요',
+                                                  format_func=lambda c: c.split(':')[1],
+                                                  help=' / '.join(f"{c.split(':')[1]}: {TAG_HELP.get(c, '')}" for c in opts))
+            if st.form_submit_button('고른 태그로 다시 추천', type='primary'):
+                INP['tags'] = {c: ctx['tags'].get(c, auto_t.get(c, ADDED_W)) for c in picked}
+                st.session_state['inputs'] = INP; st.session_state['recalc'] = True
+                st.rerun()
+        with st.popover('태그 뜻 전체 보기'):
+            for ax in [a for a in AX_KO if a in MD['ax_cols']]:
+                st.markdown(f'**{AX_KO[ax]}**  \n' + '  \n'.join(f"· {c.split(':')[1]}: {TAG_HELP.get(c, '')}"
+                                                              for c in TAG_COLS if c.startswith(ax + ':')))
+        n_add = len(set(ctx['tags']) - set(auto_t)); n_del = len(set(auto_t) - set(ctx['tags']))
+        if n_add or n_del:
+            st.caption(f'지금 추천은 직접 고친 태그로 계산했어요 (더한 태그 {n_add}개, 뺀 태그 {n_del}개).')
 
     with st.expander('✍️ 설명 보완 도우미: 이런 단어를 넣으면 이런 태그가 붙어요'):
         used_axes = {k.split(':')[0] for k in ctx['tags']}
